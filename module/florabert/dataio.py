@@ -196,7 +196,7 @@ def load_datasets(
     threshold: float = None,
     discretize: bool = False,
     kmer: int = None,
-    n_workers: int = mp.cpu_count(),
+    n_workers: int = None,
     position_buckets: Tuple[int] = None,
     random_seed: int = None,
     **kwargs,
@@ -233,13 +233,21 @@ def load_datasets(
         kmer (int, optional): whether to run the kmer flip experiment and if so,
             how large kmers to flip. Defaults to None.
         n_workers (int, optional): number of processes to use for preprocessing.
-            Defaults to `mp.cpu_count()` (number of available CPUs).
+            Defaults to half the number of available CPUs (or the value of
+            `data.n_workers` in config.yaml if set).
         position_buckets (Tuple[int], optional): the different buckets for the bucketed
             positional importance experiment
 
     Returns:
         Dataset
     """
+    if n_workers is None:
+        n_workers = config.settings.get("data", {}).get("n_workers") or max(
+            1, mp.cpu_count() // 2
+        )
+        n_workers = int(n_workers)
+    print(f"Using {n_workers} worker processes for dataset preprocessing")
+
     data_files = {"train": str(train_data)}
     if eval_data:
         data_files["eval"] = str(eval_data)

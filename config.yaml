@@ -17,6 +17,7 @@ data:
     max_seq_len: 1000
     test_size: 0.2
     num_labels: 8
+    n_workers: null  # CPU workers for dataset tokenization; null = 50% of available CPUs
 training:
     pretrain:
         num_train_epochs: 3

@@ -1,7 +1,9 @@
 """Performance of FLORABERT overall and disaggregated by tissue.
 """
 import sys
-sys.path.append('/kaggle/working/florabert')
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import torch
 from datasets import Dataset
 import pandas as pd

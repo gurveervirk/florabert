@@ -8,7 +8,9 @@ language model, then train a mean-pooling regression head with
 """
 import os
 import sys
-sys.path.append('/kaggle/working/florabert')
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import torch
 import numpy as np
 

@@ -2,7 +2,9 @@
 Pretraining on masked language model task.
 """
 import sys
-sys.path.append('/kaggle/working/florabert')
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import torch
 import os
 from module.florabert import config, utils, training, dataio

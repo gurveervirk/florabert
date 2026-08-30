@@ -7,7 +7,7 @@ import multiprocessing as mp
 import os
 import random
 import time
-from pathlib import PosixPath
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -32,7 +32,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 UBUNTU_ROOT = str(config.root)
 
 
-def load_seqs(files: Union[list, str, PosixPath], pbar=True) -> List[Seq.Seq]:
+def load_seqs(files: Union[list, str, Path], pbar=True) -> List[Seq.Seq]:
     """Load all sequences from `files` (FASTA) into a list."""
     files = utils.ensure_iterable(files)
     res = []
@@ -46,7 +46,7 @@ def load_seqs(files: Union[list, str, PosixPath], pbar=True) -> List[Seq.Seq]:
 
 
 def load_csvs(
-    files: Union[list, str, PosixPath],
+    files: Union[list, str, Path],
     show_pbar=False,
     notebook=False,
     subset=None,
@@ -161,7 +161,7 @@ def _tokenize_marker_dir(
     kmer: int,
     position_buckets: Tuple[int],
     data_files: Dict[str, str],
-) -> PosixPath:
+) -> Path:
     """Location of a tiny marker used to serialize tokenization across ranks.
 
     Only a small `_DONE` file is stored here (never the dataset), so the main
@@ -169,7 +169,7 @@ def _tokenize_marker_dir(
     HuggingFace map cache.
     """
     name = getattr(tokenizer, "name_or_path", None) or type(tokenizer).__name__
-    tag = str(PosixPath(name).stem) if name else "tokenizer"
+    tag = str(Path(name).stem) if name else "tokenizer"
     source = "".join(str(v) for v in data_files.values())
     digest = hashlib.md5(
         f"{tag}|{tokenizer.model_max_length}|{seq_key}|{nshards}|{min_seq_len}|{filter_empty}|{kmer}|{position_buckets}|{source}".encode()
@@ -179,9 +179,9 @@ def _tokenize_marker_dir(
 
 def load_datasets(
     tokenizer: PreTrainedTokenizer,
-    train_data: Union[str, PosixPath],
-    eval_data: Optional[Union[str, PosixPath]] = None,
-    test_data: Union[str, PosixPath] = None,
+    train_data: Union[str, Path],
+    eval_data: Optional[Union[str, Path]] = None,
+    test_data: Union[str, Path] = None,
     file_type: str = "csv",
     delimiter: str = "\t",
     seq_key: str = "sequence",
@@ -205,9 +205,9 @@ def load_datasets(
 
     Args:
         tokenizer (PreTrainedTokenizer): tokenizer to apply to the sequences
-        train_data (Union[str, PosixPath]): location of training data
-        eval_data (Union[str, PosixPath], optional): location of evaluation data. Defaults to None.
-        test_data (Union[str, PosixPath], optional): location of test data. Defaults to None.
+        train_data (Union[str, Path]): location of training data
+        eval_data (Union[str, Path], optional): location of evaluation data. Defaults to None.
+        test_data (Union[str, Path], optional): location of test data. Defaults to None.
         file_type (str, optional): type of file. Possible values are 'text' and 'csv'. Defaults to 'csv'.
         delimiter (str, optional): Defaults to '\t'.
         seq_key (str, optional): Column name of sequence data Can be 'sequence', 'seq', or 'text'. Defaults to 'sequence'.

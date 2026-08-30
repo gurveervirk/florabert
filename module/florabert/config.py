@@ -65,6 +65,20 @@ random.seed(random_seed)
 np.random.seed(random_seed)
 torch.manual_seed(random_seed)
 
+# GPU optimizations for modern NVIDIA GPUs (e.g. RTX 5070 Ti / Blackwell).
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    try:
+        torch.set_float32_matmul_precision("high")
+    except (AttributeError, RuntimeError):
+        pass
+    try:
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+    except (AttributeError, RuntimeError):
+        pass
+
 
 def reload_settings():
     global settings

@@ -88,6 +88,9 @@ def load_model(model_name: str,
         tuple: config_obj, tokenizer, model
     """
     config_settings = config_settings or {}
+    # Prefer SDPA attention unless explicitly overridden (enabled by default in
+    # config.yaml; this keeps SDPA active even if a model name is missing the key).
+    config_settings.setdefault("attn_implementation", "sdpa")
     max_position_embeddings = max_tokenized_len + 2  # To include SOS and EOS
     config_class, tokenizer_class, model_class, tokenizer_settings = MODELS[model_name]
     

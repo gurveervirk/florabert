@@ -1,26 +1,38 @@
 from pathlib import PosixPath
 from typing import Union, Optional
 
+import torch
+from torch import nn
+
 from transformers import (
-    RobertaConfig,
-    RobertaTokenizerFast,
-    RobertaForMaskedLM,
-    RobertaForSequenceClassification,
     BertConfig,
     BertForMaskedLM,
-    BertForSequenceClassification
+    BertForSequenceClassification,
+    ModernBertConfig,
+    ModernBertForMaskedLM,
+    ModernBertForSequenceClassification,
+    PreTrainedTokenizerFast,
+    RobertaConfig,
+    RobertaForMaskedLM,
+    RobertaForSequenceClassification,
+    RobertaTokenizerFast,
 )
 
 from .models import (
-    RobertaMeanPoolConfig,
-    RobertaForSequenceClassificationMeanPool,
+    BertForSequenceClassificationMeanPool,
     BertMeanPoolConfig,
-    BertForSequenceClassificationMeanPool
+    ModernBertForSequenceClassificationMeanPool,
+    ModernBertMeanPoolConfig,
+    RobertaForSequenceClassificationMeanPool,
+    RobertaMeanPoolConfig,
 )
 from .nlp import DNABERTTokenizer
 
 
 RobertaSettings = dict(
+    padding_side='left'
+)
+ModernBertSettings = dict(
     padding_side='left'
 )
 DnabertSettings = dict(
@@ -34,6 +46,9 @@ MODELS = {
     "roberta-lm": (RobertaConfig, RobertaTokenizerFast, RobertaForMaskedLM, RobertaSettings),
     "roberta-pred": (RobertaConfig, RobertaTokenizerFast, RobertaForSequenceClassification, RobertaSettings),
     "roberta-pred-mean-pool": (RobertaMeanPoolConfig, RobertaTokenizerFast, RobertaForSequenceClassificationMeanPool, RobertaSettings),
+    "modernbert-lm": (ModernBertConfig, PreTrainedTokenizerFast, ModernBertForMaskedLM, ModernBertSettings),
+    "modernbert-pred": (ModernBertConfig, PreTrainedTokenizerFast, ModernBertForSequenceClassification, ModernBertSettings),
+    "modernbert-pred-mean-pool": (ModernBertMeanPoolConfig, PreTrainedTokenizerFast, ModernBertForSequenceClassificationMeanPool, ModernBertSettings),
     "dnabert-lm": (BertConfig, DNABERTTokenizer, BertForMaskedLM, DnabertSettings),
     "dnabert-pred": (BertConfig, DNABERTTokenizer, BertForSequenceClassification, DnabertSettings),
     "dnabert-pred-mean-pool": (BertMeanPoolConfig, DNABERTTokenizer, BertForSequenceClassificationMeanPool, DnabertSettings)
@@ -55,11 +70,15 @@ def load_model(model_name: str,
             - 'roberta-lm',
             - 'roberta-pred',
             - 'roberta-pred-mean-pool'
+            - 'modernbert-lm',
+            - 'modernbert-pred',
+            - 'modernbert-pred-mean-pool'
             - 'dnabert'
             - 'dnabert-pred'
             - 'dnabert-pred-mean-pool'
         tokenizer_dir (Union[str, PosixPath]): Directory containing tokenizer
-            files: merges.txt and vocab.txt
+            files: merges.txt and vocab.txt (RoBERTa) or a fast tokenizer
+            (tokenizer.json) directory (ModernBERT).
         max_len (int, optional): Maximum tokenized length,
             not including SOS and EOS. Defaults to 254.
         pretrained_model (Union[str, PosixPath], optional): path to saved
@@ -89,6 +108,13 @@ def load_model(model_name: str,
         kwargs.update(dict(padding_side=padding_side))
 
     tokenizer = tokenizer_class.from_pretrained(str(tokenizer_dir), **kwargs)
+    # Cap model_max_length: ModernBERT needs it to avoid int(1e30) overflow;
+    # RoBERTa/BERT need it to avoid OOB position-embedding gather (position ids
+    # can reach num_tokens+1, which overflows max_position_embeddings).
+    if model_name.startswith("modernbert"):
+        tokenizer.model_max_length = max_position_embeddings
+    else:
+        tokenizer.model_max_length = max_tokenized_len
     name_or_path = str(pretrained_model) or ''
     config_obj = config_class(
         vocab_size=len(tokenizer),
@@ -97,10 +123,16 @@ def load_model(model_name: str,
         output_hidden_states=True,
         **config_settings
     )
+    if model_name.startswith("modernbert") and hasattr(config_obj, "reference_compile"):
+        config_obj.reference_compile = False
     if pretrained_model:
         print(f"Loading from pretrained model {pretrained_model}")
         model = model_class.from_pretrained(
-            str(pretrained_model), config=config_obj)
+            str(pretrained_model), config=config_obj, _fast_init=False)
+        if hasattr(model, "classifier"):
+            for module in model.classifier.modules():
+                if isinstance(module, nn.Linear):
+                    module.reset_parameters()
     else:
         print("Loading untrained model")
         model = model_class(config=config_obj)

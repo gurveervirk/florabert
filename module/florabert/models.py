@@ -9,7 +9,12 @@ from torch import nn
 from torch.nn import BCELoss, BCEWithLogitsLoss, MSELoss, PoissonNLLLoss, KLDivLoss
 
 from transformers import BertConfig, BertModel, RobertaConfig, RobertaModel
-from transformers import BertPreTrainedModel
+from transformers import (
+    BertPreTrainedModel,
+    ModernBertConfig,
+    ModernBertModel,
+    ModernBertPreTrainedModel,
+)
 from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers import RobertaPreTrainedModel
 
@@ -69,11 +74,11 @@ class ClassificationHeadMeanPool(nn.Module):
         return x
 
     def embed(self, features, attention_mask=None, input_ids=None, **kwargs):
-        attention_mask[input_ids == self.start_token_idx] = 0
-        attention_mask[input_ids == self.end_token_idx] = 0
-        x = torch.sum(features * attention_mask.unsqueeze(2), dim=1) / torch.sum(
-            attention_mask, dim=1, keepdim=True
-        )  # Mean pooling over non-padding tokens
+        mask = attention_mask.clone()
+        mask[input_ids == self.start_token_idx] = 0
+        mask[input_ids == self.end_token_idx] = 0
+        denom = torch.sum(mask, dim=1, keepdim=True).clamp(min=1)
+        x = torch.sum(features * mask.unsqueeze(2), dim=1) / denom
 
         x = self.dropout(x)
         x = self.dense(x)
@@ -439,3 +444,198 @@ class BertForSequenceClassificationMeanPool(BertPreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+
+# -------------------------------------- #
+#                                        #
+# -------- ModernBERT (modified) ------- #
+#                                        #
+# -------------------------------------- #
+
+
+class ModernBertMeanPoolConfig(ModernBertConfig):
+    model_type = "modernbert"
+
+    def __init__(
+        self,
+        output_mode="regression",
+        freeze_base=True,
+        start_token_idx=0,
+        end_token_idx=1,
+        threshold=1,
+        alpha=0.5,
+        log_offset=1,
+        batch_norm=False,
+        hidden_dropout_prob=None,
+        classifier_dropout=None,
+        **kwargs,
+    ):
+        """Constructs ModernBertConfig with the project's mean-pooling head settings.
+
+        ModernBERT uses `classifier_dropout` in place of the legacy
+        `hidden_dropout_prob`, so we harmonize the two so that
+        `ClassificationHeadMeanPool` (which reads `config.hidden_dropout_prob`)
+        reuses the ModernBERT dropout setting.
+        """
+        if classifier_dropout is None:
+            classifier_dropout = (
+                hidden_dropout_prob if hidden_dropout_prob is not None else 0.2
+            )
+        super().__init__(classifier_dropout=classifier_dropout, **kwargs)
+        self.output_mode = output_mode
+        self.freeze_base = freeze_base
+        self.start_token_idx = start_token_idx
+        self.end_token_idx = end_token_idx
+        self.threshold = threshold
+        self.alpha = alpha
+        self.log_offset = log_offset
+        self.batch_norm = batch_norm
+        # Alias for the custom classification head, which reads `hidden_dropout_prob`
+        self.hidden_dropout_prob = self.classifier_dropout
+
+
+class ModernBertForSequenceClassificationMeanPool(ModernBertPreTrainedModel):
+    """ModernBertForSequenceClassification using the project's mean-pooling
+    classification head (multi-output regression).
+
+    Mirrors :class:`RobertaForSequenceClassificationMeanPool` but built on
+    ``ModernBertModel`` (which does not accept ``token_type_ids`` or
+    ``head_mask`` and stores the base encoder as ``self.model``, with layers at
+    ``self.model.layers``).
+    """
+
+    _keys_to_ignore_on_load_missing = [r"position_ids"]
+
+    def __init__(self, config: ModernBertMeanPoolConfig):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.output_mode = config.output_mode or "regression"
+        self.config = config
+        self.model = ModernBertModel(config)
+        self.threshold = config.threshold
+        self.alpha = config.alpha
+        self.log_offset = config.log_offset
+
+        if self.output_mode == "sparse":
+            self.classifier = ClassificationHeadMeanPoolSparse(config)
+        else:
+            self.classifier = ClassificationHeadMeanPool(config)
+
+        self.post_init()
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        position_ids=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
+            Labels for computing the sequence classification/regression loss. Indices should be in :obj:`[0, ...,
+            config.num_labels - 1]`. If :obj:`config.num_labels == 1` a regression loss is computed (Mean-Square loss),
+            If :obj:`config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
+
+        outputs = self.model(
+            input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        sequence_output = outputs[0]
+        logits = self.classifier(
+            sequence_output, attention_mask=attention_mask, input_ids=input_ids
+        )
+
+        loss = None
+        if labels is not None:
+            if self.output_mode == "regression":
+                loss_fct = MSELoss()
+            elif self.output_mode == "sparse":
+                loss_fct = SparseMSELoss(threshold=self.threshold, alpha=self.alpha)
+            elif self.output_mode == "classification":
+                loss_fct = BCEWithLogitsLoss()
+            elif self.output_mode == "poisson":
+                loss_fct = PoissonNLLLoss()
+
+            loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1, self.num_labels))
+
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return SequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+    def embed(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        position_ids=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        """Embed sequences by running the `forward` method up to the dense layer of the classifier"""
+        outputs = self.model(
+            input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        sequence_output = outputs[0]
+        embeddings = self.classifier.embed(
+            sequence_output, attention_mask=attention_mask, input_ids=input_ids
+        )
+        return embeddings
+
+    def get_tissue_embeddings(self):
+        return self.classifier.out_proj.weight.detach()
+
+    def predict(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        position_ids=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        logits = self.forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )[0]
+        if self.output_mode == "sparse":
+            binary_logits, pred_values = logits
+            # Convert logits to binary predictions
+            binary_preds = binary_logits < 0
+            pred_values[binary_preds] = np.log(self.log_offset)
+            return pred_values
+        return logits

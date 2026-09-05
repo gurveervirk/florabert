@@ -10,10 +10,7 @@ from module.florabert import transformers as tr
 
 
 DATA_DIR = config.data_final / "transformer" / "seq"
-TOKENIZER_DIR = config.models / "byte-level-bpe-tokenizer"
-
-OUTPUT_DIR = config.models / "transformer" / "language-model"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_MODEL = "roberta-lm"
 
 
 def main():
@@ -21,10 +18,19 @@ def main():
         data_dir=DATA_DIR,
         train_data="all_seqs_train.txt",
         test_data="all_seqs_test.txt",
-        output_dir=OUTPUT_DIR,
-        model_name="roberta-lm",
-        pretrained_model = OUTPUT_DIR
+        output_dir=config.model_output_dir(DEFAULT_MODEL, "language-model"),
+        model_name=DEFAULT_MODEL,
+        pretrained_model=None,
     )
+    OUTPUT_DIR = config.model_output_dir(args.model_name, "language-model")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # Apply model-name-specific defaults unless the user overrode them on the CLI
+    if "--output-dir" not in sys.argv:
+        args.output_dir = OUTPUT_DIR
+    # Pretrain from scratch unless a pretrained model/checkpoint is explicitly
+    # provided (resume is handled via --warmstart + --pretrained-model).
+    if "--pretrained-model" not in sys.argv:
+        args.pretrained_model = None
 #     args.warmstart = True
     print(args)
 
@@ -33,7 +39,7 @@ def main():
 
     config_obj, tokenizer, model = tr.load_model(
         args.model_name,
-        TOKENIZER_DIR,
+        config.tokenizer_dir_for_model(args.model_name),
         pretrained_model=args.pretrained_model,
         **settings,
     )

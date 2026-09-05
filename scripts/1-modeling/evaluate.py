@@ -18,8 +18,7 @@ DATA_DIR = config.data_final / "transformer" / "genex"
 
 DATA_DIR = config.data_final / "transformer" / "genex" / "nam"
 TEST_DATA = "test.tsv"
-TOKENIZER_DIR = config.models / "byte-level-bpe-tokenizer"
-PREPROCESSOR = config.models / "preprocessor" / "preprocessor.pkl"
+PREPROCESSOR = None
 OUTPUT_DIR = config.output / "transformer"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -85,18 +84,24 @@ def package_metrics(results, metric_names) -> pd.DataFrame:
 
 
 def main():
+    DEFAULT_MODEL = "roberta-pred-mean-pool"
     args = utils.get_args(
         data_dir=DATA_DIR,
         train_data=TEST_DATA,
         test_data=TEST_DATA,
         output_dir=OUTPUT_DIR,
-        pretrained_model=PRETRAINED_MODEL,
-        tokenizer_dir=TOKENIZER_DIR,
-        model_name="roberta-pred-mean-pool",
+        pretrained_model=config.model_output_dir(DEFAULT_MODEL, "prediction-model") / "final",
+        tokenizer_dir=config.tokenizer_dir_for_model(DEFAULT_MODEL),
+        model_name=DEFAULT_MODEL,
         log_offset=1,
         preprocessor=PREPROCESSOR,
-        transformation="log",
+        transformation="log10",
     )
+
+    if "--tokenizer-dir" not in sys.argv:
+        args.tokenizer_dir = config.tokenizer_dir_for_model(args.model_name)
+    if "--pretrained-model" not in sys.argv:
+        args.pretrained_model = config.model_output_dir(args.model_name, "prediction-model") / "final"
 
     settings = utils.get_model_settings(config.settings, args)
 

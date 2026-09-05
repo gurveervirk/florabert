@@ -615,22 +615,24 @@ def load_pickle(path: PosixPath) -> object:
 
 
 def get_model_base(model: torch.nn.Module) -> torch.nn.Module:
-    """Get the base for `model`. Works for RoBERTa- or BERT-based
+    """Get the base for `model`. Works for RoBERTa-, BERT-, or ModernBERT-based
     models
 
     Args:
         model (torch.nn.Module): Huggingface Model
 
     Returns:
-        torch.nn.Module: Base roberta or bert encoder.
+        torch.nn.Module: Base roberta/bert/modernbert encoder.
     """
     model_name = type(model).__name__
-    if "Roberta" in model_name:
+    if "ModernBert" in model_name:
+        return model.model
+    elif "Roberta" in model_name:
         return model.roberta
     elif "Bert" in model_name:
         return model.bert
     else:
-        assert False, "Model must be based on RoBERTa or BERT."
+        assert False, "Model must be based on RoBERTa, BERT, or ModernBERT."
 
 
 def freeze_module(module: torch.nn.Module):

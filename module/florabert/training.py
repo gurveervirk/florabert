@@ -93,8 +93,12 @@ def get_plateau_schedule_with_warmup(
     return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
 
 
-def _get_optimizer(optimizer, model, num_param_groups, param_group_size, **kwargs):
-    if num_param_groups or param_group_size:
+def _get_optimizer(
+    optimizer, model, num_param_groups, param_group_size, params=None, **kwargs
+):
+    if params is not None:
+        param_groups = params
+    elif num_param_groups or param_group_size:
         param_groups = make_param_groups(model, num_param_groups, param_group_size)
     else:
         param_groups = model.parameters()
@@ -170,7 +174,9 @@ def make_param_groups(
     """
     # This is still kinda hacky
     model_name = type(model).__name__
-    if "Roberta" in model_name:
+    if "ModernBert" in model_name:
+        layers = model.model.layers
+    elif "Roberta" in model_name:
         layers = model.roberta.encoder.layer
     else:
         layers = model.bert.encoder.layer
@@ -201,6 +207,59 @@ def make_param_groups(
     print(len(param_groups))
 
     return param_groups
+
+
+def make_optimizer_and_scheduler(
+    model: torch.nn.Module,
+    training_settings: dict,
+    num_training_steps: int = 0,
+    trainable_only: bool = True,
+) -> tuple:
+    """Create an ``(optimizer, scheduler)`` pair for manual training loops.
+
+    When ``trainable_only`` is True only parameters with ``requires_grad=True``
+    get optimizer state, avoiding LAMB moments over a frozen base encoder.
+    """
+    optimizer_name = training_settings.get("optimizer", "lamb")
+    scheduler_name = training_settings.get("scheduler", "constant")
+
+    opt_kwargs = {
+        k: v
+        for k, v in training_settings.items()
+        if k in ["betas", "eps", "weight_decay", "learning_rate"]
+    }
+    sched_kwargs = {
+        k: v
+        for k, v in training_settings.items()
+        if k in ["delay_size", "num_cooldown_steps"]
+    }
+    if "warmup_steps" in training_settings:
+        sched_kwargs["num_warmup_steps"] = training_settings["warmup_steps"]
+
+    params = None
+    if trainable_only:
+        params = [p for p in model.parameters() if p.requires_grad]
+
+    opt = _get_optimizer(
+        optimizer_name,
+        model,
+        num_param_groups=training_settings.get("num_param_groups", None),
+        param_group_size=training_settings.get("param_group_size", None),
+        params=params,
+        **opt_kwargs,
+    )
+
+    num_param_groups = training_settings.get("num_param_groups", None)
+    if num_param_groups is None:
+        num_param_groups = 0
+    sched = _get_scheduler(
+        scheduler_name,
+        opt,
+        num_training_steps,
+        num_param_groups=num_param_groups + 1,
+        **sched_kwargs,
+    )
+    return opt, sched
 
 
 def make_trainer(
@@ -250,9 +309,8 @@ def make_trainer(
     training_args = MyTrainingArguments(
         output_dir=str(output_dir),
         overwrite_output_dir=overwrite_output_dir,
-        evaluation_strategy="steps",
-        # TODO: Figure out which setting for logging R2
-        prediction_loss_only=False,
+        eval_strategy="steps",
+        prediction_loss_only=not bool(metrics),
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         do_eval=True,
@@ -264,13 +322,22 @@ def make_trainer(
         assert (
             scheduler is not None
         ), "If optimizer is not None, a scheduler must be supplied"
-        num_devices = 1 if not torch.cuda.is_available() else torch.cuda.device_count()
-        num_training_steps = np.floor(
-            len(train_dataset)
-            / training_kwargs["per_device_train_batch_size"]
-            * training_kwargs["num_train_epochs"]
-#             / training_kwargs["gradient_accumulation_steps"]
-            / 2
+        if os.environ.get("KAGGLE_TPU") or os.environ.get("TPU_NAME"):
+            num_devices = 8
+        else:
+            num_devices = (
+                1 if not torch.cuda.is_available() else torch.cuda.device_count()
+            )
+        num_training_steps = int(
+            np.ceil(
+                len(train_dataset)
+                / (
+                    training_kwargs["per_device_train_batch_size"]
+                    * training_kwargs.get("gradient_accumulation_steps", 1)
+                    * num_devices
+                )
+                * training_kwargs["num_train_epochs"]
+            )
         )
 
         def create_optimizer_and_scheduler(
@@ -366,14 +433,16 @@ def make_trainer(
             opt_kwargs=opt_kwargs,
             sched_kwargs=sched_kwargs,
         )
-#     def preprocess_logits_for_metrics(logits, labels):
-#         """
-#         Original Trainer may have a memory leak. 
-#         This is a workaround to avoid storing too many tensors that are not needed.
-#         """
-#         pred_ids = torch.argmax(logits[0], dim=-1)
-#         return pred_ids, labels
-    return optimizers
+
+    return Trainer(
+        model=model,
+        args=training_args,
+        data_collator=data_collator,
+        train_dataset=train_dataset,
+        eval_dataset=test_dataset,
+        optimizers=optimizers,
+        compute_metrics=compute_metrics,
+    )
 
 
 def do_training(trainer, args, output_dir):
@@ -381,7 +450,6 @@ def do_training(trainer, args, output_dir):
     Run HuggingFace trainer, loading latest checkpoint if `args.warmstart`
     is True.
     """
-    checkpoint_dir = "/kaggle/working/florabert/models/transformer/language-model/checkpoint-600/pytorch_model.bin"
     if args.warmstart:
         ckpt = get_latest_checkpoint(output_dir)
         print(f"Resuming training from {ckpt}")
@@ -411,7 +479,7 @@ class MyTrainingArguments(TrainingArguments):
     num_param_groups: int = field(default=2)
     evaluate_during_training: bool = field(default = True)
     param_group_size: int = field(default=None)
-    predict_with_generate: bool = field(default = True)
+    predict_with_generate: bool = field(default = False)
 
 
 class MyTrainer(Trainer):

@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Large data / intermediate files - kept in the Kaggle dataset
+# (gurveersinghvirk/florabert-base) and the parent repo, not in this repo.
+normalized_tpm_data/
+data/raw/gene_expression/Normalized_TPMs_each_NAM_line_aligned_against_own_refgen/
+helper_files/
+helper_codes_outputs/
+output/
+
+# Trained models / checkpoints / tokenizer artifacts produced at runtime
+models/transformer/
+models/modernbert-byte-level-bpe-tokenizer/
+models/preprocessor/
+models/dnabert/
+
+# Notebook/IDE cruft
+.vscode/
+.idea/

@@ -56,7 +56,37 @@ If you wish to experiment with our pre-trained FLORABERT models, you can find th
 
 ### Personal Updates on Forked Repo: 
 
-Kindly refer [`gz_link`](https://github.com/gurveervirk/florabert/tree/main/data/raw/gz_link) for the raw data and links used for data collection and preprocessing, [`research_papers`](https://github.com/gurveervirk/florabert/tree/main/research_papers) for the 26 NAM lines and the references used throughout the project and [`config.py`](https://github.com/gurveervirk/florabert/blob/main/module/florabert/config.py) and the corresponding [`config.yaml`](https://github.com/gurveervirk/florabert/blob/main/config.yaml) for the configurations used (the tissues array in config.py correspond to the values in labels col of data). Majority of the execution has been carried out in [`Colab Notebook`](https://colab.research.google.com/drive/1UsBeiMqeT2ntQbuJhmwceBEswSLOzjr1?usp=sharing) and [`Kaggle Notebook`](https://www.kaggle.com/code/gurveersinghvirk/florabert-2/)
+Kindly refer [`gz_link`](https://github.com/gurveervirk/florabert/tree/main/data/raw/gz_link) for the raw data and links used for data collection and preprocessing, [`research_papers`](https://github.com/gurveervirk/florabert/tree/main/research_papers) for the 26 NAM lines and the references used throughout the project and [`config.py`](https://github.com/gurveervirk/florabert/blob/main/module/florabert/config.py) and the corresponding [`config.yaml`](https://github.com/gurveervirk/florabert/blob/main/config.yaml) for the configurations used (the tissues array in config.py correspond to the values in labels col of data). Majority of the execution has been carried out in [`Colab Notebook`](https://colab.research.google.com/drive/1UsBeiMqeT2ntQbuJhmwceBEswSLOzjr1?usp=sharing) and the pinned [`Kaggle Notebook`](https://www.kaggle.com/code/gurveersinghvirk/florabert-2?scriptVersionId=81).
+
+### ModernBERT support
+
+This fork adds **ModernBERT** as an alternative base model (RoBERTa and DNABERT
+paths are kept intact). ModernBERT requires `transformers>=4.48,<5.0` (pin the
+4.x line — ModernBERT uses a tokenizer with no dedicated class and is loaded via
+`PreTrainedTokenizerFast`).
+
+- **Tokenzier**: train the byte-level BPE tokenizer with ModernBERT-style
+  special tokens (`[CLS]/[SEP]/[PAD]/[UNK]/[MASK]`), saved as a fast-tokenizer
+  directory (`tokenizer.json`):
+  `python scripts/0-data-loading-processing/07_train_tokenizer.py --model modernbert`
+- **Pretrain** (MLM): `python scripts/1-modeling/pretrain.py --model-name modernbert-lm`
+- **Finetune** (multitask gene-expression regression): `python scripts/1-modeling/finetune.py --model-name modernbert-pred-mean-pool`
+- **Evaluate**: `python scripts/1-modeling/evaluate.py --model-name modernbert-pred-mean-pool`
+
+The default small architecture (6 layers, 6 heads, hidden 768) mirrors the
+original RoBERTa config; `modernbert-base.intermediate_size: 2048` is set so the
+GeGLU MLP has roughly the same number of parameters as RoBERTa's 3072-wide MLP,
+keeping the head-to-head comparison param-matched. ModernBERT checkpoints are
+saved separately under `models/transformer/language-model-modernbert` and
+`models/transformer/prediction-model-modernbert`, and use
+`models/modernbert-byte-level-bpe-tokenizer`.
+
+A ready-to-run GPU **Kaggle notebook** (tokenizer → pretrain → finetune →
+evaluate) is provided at
+[`notebooks/modernflorabert_modernbert.ipynb`](notebooks/modernflorabert_modernbert.ipynb).
+It **clones this repository for code** and **copies the data from the
+`florabert-base` Kaggle dataset** (the original data is kept there; this repo
+is intentionally lean and does not ship the raw data or intermediate outputs).
 
 **First module has been completed. All data / outputs are under [`data`](https://github.com/gurveervirk/florabert/tree/main/data) or [`models`](https://github.com/gurveervirk/florabert/tree/main/models). Moving to Second Module. The following steps were essential for this [script](https://github.com/gurveervirk/florabert/blob/main/scripts/0-data-loading-processing/04-process-genex-nam.py).**
 

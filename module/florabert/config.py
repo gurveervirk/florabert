@@ -28,6 +28,34 @@ dnabert = root / 'DNABERT'
 # Locations of specific files
 bpe_tokenizer = data_final / 'tokenizer' / 'maize_bpe_full.tokenizer.json'
 
+# Tokenizer directories (for RoBERTa and ModernBERT byte-level-BPE tokenizers)
+roberta_tokenizer_dir = models / 'byte-level-bpe-tokenizer'
+modernbert_tokenizer_dir = models / 'modernbert-byte-level-bpe-tokenizer'
+
+
+def tokenizer_dir_for_model(model_name: str) -> Path:
+    """Return the tokenizer directory appropriate for `model_name`.
+
+    ModernBERT uses a separate byte-level-BPE tokenizer trained with
+    ModernBERT-style special tokens ([CLS]/[SEP]/[PAD]/[UNK]/[MASK]) and saved as
+    a fast-tokenizer (`tokenizer.json`) directory. Everything else uses the
+    original RoBERTa byte-level-BPE tokenizer.
+    """
+    base = model_name.split('-')[0]
+    if base == 'modernbert':
+        return modernbert_tokenizer_dir
+    return roberta_tokenizer_dir
+
+
+def model_output_dir(model_name: str, stage: str) -> Path:
+    """Return the model output directory for `stage` ('language-model' or
+    'prediction-model'), keeping ModernBERT checkpoints separate from the
+    original RoBERTa ones under models/transformer/<stage>."""
+    base = model_name.split('-')[0]
+    if base == 'modernbert':
+        return models / 'transformer' / f'{stage}-{base}'
+    return models / 'transformer' / stage
+
 # Loading settings
 settings = yaml.full_load((root / 'config.yaml').open('r'))
 

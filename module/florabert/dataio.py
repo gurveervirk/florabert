@@ -1,10 +1,12 @@
 """ Utilities for reading and writing data files.
 """
 import csv
+import hashlib
 import itertools
 import multiprocessing as mp
 import os
 import random
+import time
 from pathlib import PosixPath
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
@@ -141,6 +143,40 @@ def load_b73_genex_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     return df_train, df_test
 
 
+def _is_distributed_main_worker() -> bool:
+    """True if this process is the main worker of a distributed run (torchrun
+    sets `LOCAL_RANK`), or the only process (single-process runs)."""
+    local_rank = os.environ.get("LOCAL_RANK")
+    if local_rank is None:
+        return True
+    return int(local_rank) == 0
+
+
+def _tokenize_marker_dir(
+    tokenizer: PreTrainedTokenizer,
+    seq_key: str,
+    nshards: int,
+    min_seq_len: int,
+    filter_empty: bool,
+    kmer: int,
+    position_buckets: Tuple[int],
+    data_files: Dict[str, str],
+) -> PosixPath:
+    """Location of a tiny marker used to serialize tokenization across ranks.
+
+    Only a small `_DONE` file is stored here (never the dataset), so the main
+    worker's tokenization is done before other distributed workers reuse its
+    HuggingFace map cache.
+    """
+    name = getattr(tokenizer, "name_or_path", None) or type(tokenizer).__name__
+    tag = str(PosixPath(name).stem) if name else "tokenizer"
+    source = "".join(str(v) for v in data_files.values())
+    digest = hashlib.md5(
+        f"{tag}|{tokenizer.model_max_length}|{seq_key}|{nshards}|{min_seq_len}|{filter_empty}|{kmer}|{position_buckets}|{source}".encode()
+    ).hexdigest()[:12]
+    return config.data_final / "transformer" / "tokenized-cache" / f"{tag}-{digest}"
+
+
 def load_datasets(
     tokenizer: PreTrainedTokenizer,
     train_data: Union[str, PosixPath],
@@ -233,12 +269,40 @@ def load_datasets(
         )
         datasets = datasets.map(kmer_flip, batched=True, num_proc=n_workers)
 
-    # Tokenizing
+    # Tokenizing. Only the main worker runs the (slow) map; other torchrun ranks
+    # wait for its `_DONE` marker and then reuse the HuggingFace map cache the
+    # main worker already wrote. This avoids duplicate tokenization (both ranks
+    # competing for the same CPUs) without persisting a separate dataset copy.
     preprocess_fn = make_preprocess_function(tokenizer, seq_key=seq_key)
-    print("Tokenizing")
-    datasets = datasets.map(preprocess_fn, batched=True, num_proc=n_workers)
-    if filter_empty:
-        datasets = datasets.filter(filter_empty_sequence)
+    marker_dir = _tokenize_marker_dir(
+        tokenizer, seq_key, nshards, min_seq_len, filter_empty, kmer, position_buckets, data_files
+    )
+    if _is_distributed_main_worker():
+        (marker_dir / "_DONE").unlink(missing_ok=True)
+        t0 = time.time()
+        print(
+            f"[tokenize] local_rank={os.environ.get('LOCAL_RANK')} n_workers={n_workers} "
+            f"splits={ {k: len(v) for k, v in datasets.items()} }"
+        )
+        datasets = datasets.map(preprocess_fn, batched=True, num_proc=n_workers)
+        if filter_empty:
+            datasets = datasets.filter(filter_empty_sequence)
+        print(f"[tokenize] rank 0: tokenization done in {time.time() - t0:.1f}s")
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        (marker_dir / "_DONE").touch()
+    else:
+        print(
+            f"[tokenize] local_rank={os.environ.get('LOCAL_RANK')} waiting for {marker_dir / '_DONE'}"
+        )
+        while not (marker_dir / "_DONE").exists():
+            time.sleep(10)
+        t0 = time.time()
+        print("Reusing tokenized dataset from main worker's map cache")
+        datasets = datasets.map(preprocess_fn, batched=True, num_proc=n_workers)
+        if filter_empty:
+            datasets = datasets.filter(filter_empty_sequence)
+        print(f"[tokenize] rank>0: cache reuse done in {time.time() - t0:.1f}s")
+        (marker_dir / "_DONE").unlink(missing_ok=True)
 
     if file_type != "text":
         datasets = datasets.map(
@@ -277,11 +341,12 @@ def load_datasets(
                     batched=True,
                     num_proc=1,
                 )
-            elif transformation == "log":
+            elif transformation in ("log", "log10"):
                 log_offset = log_offset or 0
-                print(f"Log transformation with offset {log_offset}")
+                fn = preprocess_log10_transform if transformation == "log10" else preprocess_log_transform
+                print(f"{transformation} transformation with offset {log_offset}")
                 datasets = datasets.map(
-                    lambda x: preprocess_log_transform(x, log_offset),
+                    lambda x: fn(x, log_offset),
                     batched=True,
                     num_proc=n_workers,
                 )
@@ -411,6 +476,14 @@ def make_min_length_filter(min_seq_len: int, seq_key: str = None) -> dict:
 
 def preprocess_log_transform(examples: dict, eps=1) -> dict:
     """Log transform values in a list, offsetting by `eps` (default 1) to avoid 0s"""
+    log_transformed = []
+    for ex in examples["labels"]:
+        log_transformed.append([np.log10(x + eps) for x in ex])
+    return {"labels": log_transformed}
+
+
+def preprocess_log10_transform(examples: dict, eps=1) -> dict:
+    """Log10 transform values in a list, offsetting by `eps` (default 1) to avoid 0s"""
     log_transformed = []
     for ex in examples["labels"]:
         log_transformed.append([np.log10(x + eps) for x in ex])

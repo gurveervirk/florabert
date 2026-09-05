@@ -16,9 +16,10 @@ import tensorboard as tb
 tf.io.gfile = tb.compat.tensorflow_stub.io.gfile
 
 
-SETTINGS = config.settings["transformer"]
-MODEL_PATH = config.models / "transformer" / "prediction-model"
-TOKENIZER_DIR = config.models / "byte-level-bpe-tokenizer"
+SETTINGS = config.settings
+MODEL_NAME = "roberta-pred-mean-pool"
+MODEL_PATH = config.model_output_dir(MODEL_NAME, "prediction-model") / "final"
+TOKENIZER_DIR = config.tokenizer_dir_for_model(MODEL_NAME)
 DATA_DIR = config.data_final / "transformer" / "genex"
 TRAIN_DATA = DATA_DIR / "train.tsv"
 TEST_DATA = DATA_DIR / "dev.tsv"
@@ -29,13 +30,12 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def load_model():
+    settings = utils.get_model_settings(config.settings, model_name=MODEL_NAME)
     return tr.load_model(
-        SETTINGS["prediction-model"]["name"],
+        MODEL_NAME,
         TOKENIZER_DIR,
-        max_len=SETTINGS["data"]["max_tokenized_len"],
         pretrained_model=MODEL_PATH,
-        **SETTINGS["language-model"]["config"],
-        **SETTINGS["prediction-model"]["config"]
+        **settings,
     )
 
 

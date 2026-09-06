@@ -74,6 +74,14 @@ def _assert_finite_model(model, stage):
         raise RuntimeError(f"Non-finite model parameter after {stage}: {name}")
 
 
+def _tensor_summary(tensor):
+    values = tensor.detach().float()
+    return (
+        f"min={values.min().item():.6g}, max={values.max().item():.6g}, "
+        f"absmax={values.abs().max().item():.6g}"
+    )
+
+
 def main():
     args = utils.get_args(
         data_dir=DATA_DIR,
@@ -223,7 +231,9 @@ def main():
             loss = outputs.loss
             if loss is None or not torch.isfinite(loss.detach()).all():
                 raise RuntimeError(
-                    f"Non-finite loss before backward at training step {global_step}: {loss}"
+                    f"Non-finite loss before backward at training step {global_step}: "
+                    f"{loss}; labels({_tensor_summary(inputs['labels'])}); "
+                    f"logits({_tensor_summary(outputs.logits)})"
                 )
             if not torch.isfinite(outputs.logits.detach()).all():
                 raise RuntimeError(

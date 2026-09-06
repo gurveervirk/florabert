@@ -125,6 +125,11 @@ def main():
 
     data_collator = dataio.load_data_collator("pred")
     training_settings = dict(config.settings["training"]["finetune"])
+    # Keep the displayed and logged precision aligned with the Accelerator
+    # argument; the legacy config flags may still contain fp16: true.
+    training_settings["precision"] = args.precision
+    training_settings["fp16"] = args.precision == "fp16"
+    training_settings["bf16"] = args.precision == "bf16"
     if args.learning_rate is not None:
         training_settings["learning_rate"] = args.learning_rate
     if args.num_train_epochs is not None:
@@ -136,6 +141,8 @@ def main():
     eval_batch_size = training_settings.get("per_device_eval_batch_size", 8)
 
     accelerator = Accelerator(mixed_precision=args.precision)
+    selected_precision = accelerator.state.mixed_precision
+    accelerator.print(f"Selected mixed precision: {selected_precision}")
 
     train_dataloader = DataLoader(
         dataset_train,
@@ -166,12 +173,18 @@ def main():
         wandb.init(
             project=os.environ.get("WANDB_PROJECT", "florabert"),
             config={
+                **training_settings,
                 "model_name": args.model_name,
                 "transformation": args.transformation,
+                # Record the effective Accelerator setting, not the legacy
+                # TrainingArguments-style fp16 flag from config.yaml.
+                "precision": selected_precision,
+                "mixed_precision": selected_precision,
+                "fp16": selected_precision == "fp16",
+                "bf16": selected_precision == "bf16",
                 "train_size": len(dataset_train),
                 "eval_size": len(dataset_eval),
                 "num_trainable_params": num_params,
-                **training_settings,
             },
         )
 
@@ -212,6 +225,7 @@ def main():
                         "loss": running_loss / logging_steps,
                         "learning_rate": lr,
                         "step": global_step,
+                        "precision": selected_precision,
                         "train/logit_mean": float(logits.mean().cpu()),
                         "train/logit_std": float(logits.std().cpu()),
                     }

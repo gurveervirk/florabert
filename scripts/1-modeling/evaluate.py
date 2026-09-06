@@ -40,7 +40,7 @@ def load_data(tokenizer, test_data) -> Dataset:
     return datasets["train"]
 
 
-def get_metrics(num_tissues) -> tuple:
+def get_metrics(num_tissues, transformation="log10") -> tuple:
     metric_types = ["mse", "mae", "r2", "pseudo-r2"]
     metric_names = [
         *[
@@ -52,12 +52,14 @@ def get_metrics(num_tissues) -> tuple:
     ]
     metric_fns = [
         *[
-            metrics.make_tissue_loss(i, metric=metric)
+            metrics.make_tissue_loss(
+                i, metric=metric, transformation=transformation
+            )
             for metric in metric_types
             for i in range(num_tissues)
         ],
         torch.nn.MSELoss(),
-        metrics.make_mae_loss(),
+        metrics.make_mae_loss(transformation),
         utils.compute_r2,
         utils.compute_pseudo_r2,
     ]
@@ -67,6 +69,10 @@ def get_metrics(num_tissues) -> tuple:
 def package_metrics(results, metric_names) -> pd.DataFrame:
     data = {}
     for metric, value in zip(metric_names, results):
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().item()
+        elif isinstance(value, np.generic):
+            value = value.item()
         name_split = metric.split("_")
         if len(name_split) == 1:
             metric_name = metric
@@ -140,7 +146,9 @@ def main():
     print("Getting predictions")
     trg_true, trg_pred = metrics.get_predictions(model, dataset_test)
 
-    metric_names, metric_fns = get_metrics(settings["num_labels"])
+    metric_names, metric_fns = get_metrics(
+        settings["num_labels"], transformation=args.transformation
+    )
 
     print("Evaluating")
     results = metrics.evaluate_model(trg_true, trg_pred, metric_fns)
@@ -165,6 +173,13 @@ def main():
     assert (
         maize_lines["gene_id"].values == maize_lines_joined["gene_id"].values
     ).all(), "After joining the indices are not aligned."
+
+    if len(maize_lines_joined) != len(trg_true):
+        print(
+            "Skipping NAM-line metrics: metadata has "
+            f"{len(maize_lines_joined)} rows but evaluation has {len(trg_true)}."
+        )
+        return
 
     print("Evaluating for each maize line")
 

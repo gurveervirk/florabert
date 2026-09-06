@@ -1,9 +1,6 @@
 from pathlib import PosixPath
 from typing import Union, Optional
 
-import torch
-from torch import nn
-
 from transformers import (
     BertConfig,
     BertForMaskedLM,
@@ -129,10 +126,6 @@ def load_model(model_name: str,
         print(f"Loading from pretrained model {pretrained_model}")
         model = model_class.from_pretrained(
             str(pretrained_model), config=config_obj, _fast_init=False)
-        if hasattr(model, "classifier"):
-            for module in model.classifier.modules():
-                if isinstance(module, nn.Linear):
-                    module.reset_parameters()
     else:
         print("Loading untrained model")
         model = model_class(config=config_obj)

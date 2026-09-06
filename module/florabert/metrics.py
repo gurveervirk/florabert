@@ -77,7 +77,7 @@ def evaluate_model(
     return [metric_fn(trg_pred, trg_true) for metric_fn in metric_fns]
 
 
-def make_tissue_loss(tissue_idx, metric="mse") -> callable:
+def make_tissue_loss(tissue_idx, metric="mse", transformation="log10") -> callable:
     """Make a tissue-specific loss function
 
     Args:
@@ -92,7 +92,7 @@ def make_tissue_loss(tissue_idx, metric="mse") -> callable:
         if metric == "mse":
             loss_fn = torch.nn.MSELoss()
         elif metric == "mae":
-            loss_fn = make_mae_loss()
+            loss_fn = make_mae_loss(transformation)
         elif metric == "rmse":
             mse_loss = torch.nn.MSELoss()
 
@@ -109,7 +109,7 @@ def make_tissue_loss(tissue_idx, metric="mse") -> callable:
     return loss
 
 
-def make_mae_loss() -> callable:
+def make_mae_loss(transformation="log10") -> callable:
     """Make a function computing MAE (L1) loss
 
     Returns:
@@ -117,7 +117,16 @@ def make_mae_loss() -> callable:
     """
     mae_loss = torch.nn.L1Loss()
 
+    if transformation == "log10":
+        inverse = lambda x: torch.pow(10.0, x) - 1.0
+    elif transformation == "log":
+        inverse = lambda x: torch.exp(x) - 1.0
+    else:
+        raise ValueError(
+            "Original-scale MAE requires a 'log' or 'log10' transformation"
+        )
+
     def loss_fn(x, y):
-        return mae_loss(torch.exp(x) - 1, torch.exp(y) - 1)
+        return mae_loss(inverse(x), inverse(y))
 
     return loss_fn

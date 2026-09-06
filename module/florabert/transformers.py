@@ -1,5 +1,7 @@
 from pathlib import PosixPath
 from typing import Union, Optional
+import torch
+from torch import nn
 
 from transformers import (
     BertConfig,
@@ -129,5 +131,18 @@ def load_model(model_name: str,
     else:
         print("Loading untrained model")
         model = model_class(config=config_obj)
+
+    # A language-model checkpoint does not contain the custom prediction head.
+    # Reinitialize it if a checkpoint loader left any head values non-finite.
+    if hasattr(model, "classifier"):
+        head_is_nonfinite = any(
+            not torch.isfinite(parameter.detach()).all()
+            for parameter in model.classifier.parameters()
+        )
+        if head_is_nonfinite:
+            print("Warning: reinitializing non-finite prediction head")
+            for module in model.classifier.modules():
+                if isinstance(module, nn.Linear):
+                    model._init_weights(module)
     model.resize_token_embeddings(len(tokenizer))
     return config_obj, tokenizer, model

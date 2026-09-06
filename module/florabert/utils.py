@@ -316,6 +316,7 @@ def get_args(
     output_mode=None,
     learning_rate=None,
     num_train_epochs=None,
+    precision="fp16",
 ) -> argparse.Namespace:
     """Use Python's ArgumentParser to create a namespace from (optional) user input
 
@@ -450,6 +451,13 @@ def get_args(
         type=str,
         help='Output mode for model: {"regression", "classification"}',
         default=output_mode,
+    )
+    parser.add_argument(
+        "--precision",
+        type=str,
+        choices=("no", "fp16", "bf16"),
+        default=precision,
+        help="Mixed-precision mode for finetuning. Use 'bf16' for bfloat16.",
     )
     parser.add_argument(
         "--learning-rate",

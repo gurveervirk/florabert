@@ -4,6 +4,9 @@ using accelerate for manual train/eval loops.
 """
 import os
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.append('/kaggle/working/florabert')
 import numpy as np
 import torch
@@ -37,6 +40,26 @@ def load_model(args, settings):
     )
 
 
+def _head_diagnostics(model, optimizer):
+    """Return prediction-head norms and LAMB state for debugging stalled runs."""
+    head = model.classifier
+    output_layer = head.out_proj
+    weight = output_layer.weight
+    state = optimizer.state.get(weight, {})
+
+    def scalar(name):
+        value = state.get(name)
+        return float(value.detach().float().cpu()) if value is not None else None
+
+    return {
+        "head/weight_norm": float(weight.detach().float().norm().cpu()),
+        "head/bias_norm": float(output_layer.bias.detach().float().norm().cpu()),
+        "lamb/weight_norm": scalar("weight_norm"),
+        "lamb/adam_norm": scalar("adam_norm"),
+        "lamb/trust_ratio": scalar("trust_ratio"),
+    }
+
+
 def main():
     args = utils.get_args(
         data_dir=DATA_DIR,
@@ -52,6 +75,7 @@ def main():
         transformation=config.settings["training"]["finetune"]["transformation"],
         learning_rate=config.settings["training"]["finetune"]["learning_rate"],
         num_train_epochs=config.settings["training"]["finetune"]["num_train_epochs"],
+        precision=config.settings["training"]["finetune"].get("precision", "bf16"),
         hyperparam_search_metrics="mse",
         hyperparam_search_trials=10,
     )
@@ -111,7 +135,7 @@ def main():
     train_batch_size = training_settings.get("per_device_train_batch_size", 64)
     eval_batch_size = training_settings.get("per_device_eval_batch_size", 8)
 
-    accelerator = Accelerator(mixed_precision="fp16")
+    accelerator = Accelerator(mixed_precision=args.precision)
 
     train_dataloader = DataLoader(
         dataset_train,
@@ -182,14 +206,18 @@ def main():
             if global_step % logging_steps == 0:
                 lr = scheduler.get_last_lr()[0]
                 if accelerator.is_main_process:
+                    logits = outputs.logits.detach().float()
                     log = {
                         "epoch": epoch + (global_step % steps_per_epoch) / steps_per_epoch,
                         "loss": running_loss / logging_steps,
                         "learning_rate": lr,
                         "step": global_step,
+                        "train/logit_mean": float(logits.mean().cpu()),
+                        "train/logit_std": float(logits.std().cpu()),
                     }
                     if grad_norm is not None:
                         log["grad_norm"] = grad_norm
+                    log.update(_head_diagnostics(accelerator.unwrap_model(model), optimizer))
                     wandb.log(log)
                 running_loss = 0.0
 
@@ -209,14 +237,25 @@ def main():
 
         eval_mse = compute_mse(all_labels, all_predictions)
         eval_r2 = compute_r2(all_labels, all_predictions)
-        accelerator.print(f"epoch {epoch}: eval mse={eval_mse:.4f} r2={eval_r2:.4f}")
+        prediction_mean = float(all_predictions.float().mean())
+        prediction_std = float(all_predictions.float().std())
+        accelerator.print(
+            f"epoch {epoch}: eval mse={eval_mse:.4f} r2={eval_r2:.4f} "
+            f"pred_mean={prediction_mean:.6f} pred_std={prediction_std:.6f}"
+        )
         if accelerator.is_main_process:
-            wandb.log(
+            eval_log = _head_diagnostics(accelerator.unwrap_model(model), optimizer)
+            eval_log.update(
                 {
                     "epoch": epoch + 1,
                     "eval/mse": float(eval_mse),
                     "eval/r2": float(eval_r2),
+                    "eval/pred_mean": prediction_mean,
+                    "eval/pred_std": prediction_std,
                 }
+            )
+            wandb.log(
+                eval_log
             )
 
         unwrapped_model = accelerator.unwrap_model(model)

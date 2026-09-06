@@ -49,7 +49,9 @@ def main():
         model_name=DEFAULT_MODEL,
         log_offset=1,
         preprocessor=PREPROCESSOR,
-        transformation="log10",
+        transformation=config.settings["training"]["finetune"]["transformation"],
+        learning_rate=config.settings["training"]["finetune"]["learning_rate"],
+        num_train_epochs=config.settings["training"]["finetune"]["num_train_epochs"],
         hyperparam_search_metrics="mse",
         hyperparam_search_trials=10,
     )
@@ -98,7 +100,7 @@ def main():
     print(f"Loaded training data with {len(dataset_train)} examples")
 
     data_collator = dataio.load_data_collator("pred")
-    training_settings = config.settings["training"]["finetune"]
+    training_settings = dict(config.settings["training"]["finetune"])
     if args.learning_rate is not None:
         training_settings["learning_rate"] = args.learning_rate
     if args.num_train_epochs is not None:

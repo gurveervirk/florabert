@@ -60,6 +60,20 @@ def _head_diagnostics(model, optimizer):
     }
 
 
+def _first_nonfinite_tensor(tensors):
+    """Return the first named tensor containing NaN or Inf values."""
+    for name, tensor in tensors:
+        if tensor is not None and not torch.isfinite(tensor.detach()).all():
+            return name
+    return None
+
+
+def _assert_finite_model(model, stage):
+    name = _first_nonfinite_tensor(model.named_parameters())
+    if name is not None:
+        raise RuntimeError(f"Non-finite model parameter after {stage}: {name}")
+
+
 def main():
     args = utils.get_args(
         data_dir=DATA_DIR,
@@ -93,6 +107,7 @@ def main():
 
     print("Making model")
     config_obj, tokenizer, model = load_model(args, settings)
+    _assert_finite_model(model, "model load")
     if args.freeze_base:
         print("Freezing base")
         utils.freeze_base(model)
@@ -202,15 +217,41 @@ def main():
         for batch in train_dataloader:
             optimizer.zero_grad()
             inputs = {k: v for k, v in batch.items() if k in MODEL_INPUT_KEYS}
+            if not torch.isfinite(inputs["labels"]).all():
+                raise RuntimeError(f"Non-finite labels at training step {global_step}")
             outputs = model(**inputs)
             loss = outputs.loss
+            if loss is None or not torch.isfinite(loss.detach()).all():
+                raise RuntimeError(
+                    f"Non-finite loss before backward at training step {global_step}: {loss}"
+                )
+            if not torch.isfinite(outputs.logits.detach()).all():
+                raise RuntimeError(
+                    f"Non-finite logits before backward at training step {global_step}"
+                )
             accelerator.backward(loss)
+            bad_grad = _first_nonfinite_tensor(
+                (name, parameter.grad)
+                for name, parameter in model.named_parameters()
+                if parameter.grad is not None
+            )
+            if bad_grad is not None:
+                raise RuntimeError(
+                    f"Non-finite gradient before optimizer step at training step "
+                    f"{global_step}: {bad_grad}"
+                )
             grad_norm = None
             if "max_grad_norm" in training_settings:
                 grad_norm = accelerator.clip_grad_norm_(
                     model.parameters(), training_settings["max_grad_norm"]
                 ).item()
+                if not np.isfinite(grad_norm):
+                    raise RuntimeError(
+                        f"Non-finite gradient norm at training step {global_step}: "
+                        f"{grad_norm}"
+                    )
             optimizer.step()
+            _assert_finite_model(model, f"optimizer step {global_step}")
             scheduler.step()
             progress_bar.update(1)
 

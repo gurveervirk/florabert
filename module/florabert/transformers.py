@@ -143,6 +143,15 @@ def load_model(model_name: str,
             print("Warning: reinitializing non-finite prediction head")
             for module in model.classifier.modules():
                 if isinstance(module, nn.Linear):
-                    model._init_weights(module)
+                    # The HF missing-key path can leave custom head modules
+                    # with uninitialized storage. Use PyTorch's explicit
+                    # initializer rather than relying on the base model's
+                    # architecture-specific _init_weights hook.
+                    module.reset_parameters()
+            if any(
+                not torch.isfinite(parameter.detach()).all()
+                for parameter in model.classifier.parameters()
+            ):
+                raise RuntimeError("Prediction head remains non-finite after initialization")
     model.resize_token_embeddings(len(tokenizer))
     return config_obj, tokenizer, model

@@ -1,11 +1,4 @@
-""" Training byte-level BPE tokenizers for RoBERTa or ModernBERT base models.
-
-Memory model (important):
-The ``tokenizers`` trainer accumulates a word-frequency map for every sequence
-fed into a single ``train_from_iterator`` call. Because each DNA sequence is a
-single "word" under the ByteLevel pre-tokenizer (no whitespace), the map grows
-with the number of (mostly unique) sequences. Training on the full corpus
-(~8.5M sequences) exceeds Kaggle's ~30 GB RAM, so we train on a sub-sample.
+"""Training byte-level BPE tokenizers for RoBERTa or ModernBERT base models.
 
 By default we take 1/20 of the corpus (``total // 20``) -- the same volume the
 original florabert-2 20-iteration training effectively used per chunk. Override
@@ -18,13 +11,12 @@ from pathlib import Path
 from tokenizers import ByteLevelBPETokenizer
 from transformers import PreTrainedTokenizerFast
 
-# Make `module` importable when run as `python scripts/0-data-loading-processing/07_train_tokenizer.py`
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from module.florabert import config
 
 
-SETTINGS = config.settings["tokenizer"]  # previously config.settings["transformer"]["tokenizer"]
+SETTINGS = config.settings["tokenizer"]
 
 SPECIAL_TOKENS = {
     # RoBERTa-style special tokens (order determines token ids: <s>=0, </s>=1, ...)
@@ -113,8 +105,6 @@ def main():
             f"{sample_data.name} or {full_data.name}."
         )
     special_tokens = SPECIAL_TOKENS[args.model]
-    # The model config derives its vocab_size from len(tokenizer), so the
-    # trainer target equals the configured vocab_size (special tokens included).
     vocab_size = SETTINGS["vocab_size"]
 
     max_sequences = args.max_sequences
@@ -129,8 +119,6 @@ def main():
           f"max_sequences={max_sequences}")
     tokenizer = ByteLevelBPETokenizer()
 
-    # Single call over a capped, lazy batch iterator: the trainer accumulates a
-    # word map for everything it sees, so the cap is what keeps RAM bounded.
     tokenizer.train_from_iterator(
         iterator=batch_iterator(TRAIN_DATA, max_sequences=max_sequences),
         vocab_size=vocab_size,
@@ -139,9 +127,6 @@ def main():
 
     if args.model == "modernbert":
         print("Saving ModernBERT fast tokenizer")
-        # ModernBERT (tokenizer_class "PreTrainedTokenizerFast") expects a full
-        # fast-tokenizer directory (tokenizer.json) when loaded with
-        # PreTrainedTokenizerFast.from_pretrained.
         fast_tokenizer = PreTrainedTokenizerFast(
             tokenizer_object=tokenizer,
             bos_token="[CLS]",
@@ -152,10 +137,6 @@ def main():
             pad_token="[PAD]",
             mask_token="[MASK]",
         )
-        # Persist a real model_max_length so tokenizer_config.json doesn't carry
-        # transformers' int(1e30) sentinel (which crashes enable_truncation with
-        # "OverflowError: int too big to convert" when max_length is taken from
-        # tokenizer.model_max_length).
         max_tokenized_len = config.settings["models"]["modernbert-base"].get(
             "max_tokenized_len", 256
         )

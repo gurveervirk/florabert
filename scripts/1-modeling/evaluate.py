@@ -22,9 +22,6 @@ PREPROCESSOR = None
 OUTPUT_DIR = config.output / "transformer"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Set before parsing so defaults depend on the model name:
-# The per-model default paths are applied in main() below.
-
 
 def load_model(args, settings):
     return tr.load_model(
@@ -72,6 +69,10 @@ def get_metrics(num_tissues, transformation="log") -> tuple:
 def package_metrics(results, metric_names) -> pd.DataFrame:
     data = {}
     for metric, value in zip(metric_names, results):
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().item()
+        elif isinstance(value, np.generic):
+            value = value.item()
         name_split = metric.split("_")
         if metric in {"mse", "mae", "pearson_r2", "r2"}:
             metric_name = metric
@@ -103,7 +104,6 @@ def main():
         transformation="log",
     )
 
-    # Apply model-name-specific defaults unless the user overrode them on the CLI
     if "--tokenizer-dir" not in sys.argv:
         args.tokenizer_dir = config.tokenizer_dir_for_model(args.model_name)
     if "--pretrained-model" not in sys.argv:
@@ -173,6 +173,13 @@ def main():
     assert (
         maize_lines["gene_id"].values == maize_lines_joined["gene_id"].values
     ).all(), "After joining the indices are not aligned."
+
+    if len(maize_lines_joined) != len(trg_true):
+        print(
+            "Skipping NAM-line metrics: metadata has "
+            f"{len(maize_lines_joined)} rows but evaluation has {len(trg_true)}."
+        )
+        return
 
     print("Evaluating for each maize line")
 

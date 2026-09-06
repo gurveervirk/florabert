@@ -105,11 +105,13 @@ def load_model(model_name: str,
         kwargs.update(dict(padding_side=padding_side))
 
     tokenizer = tokenizer_class.from_pretrained(str(tokenizer_dir), **kwargs)
-    # Cap model_max_length to the model's positional limit. Without this, a
-    # bare PreTrainedTokenizerFast (ModernBERT) keeps transformers' default
-    # int(1e30) sentinel, which overflows the Rust tokenizer's
-    # enable_truncation -> "OverflowError: int too big to convert".
-    tokenizer.model_max_length = max_position_embeddings
+    # Cap model_max_length: ModernBERT needs it to avoid int(1e30) overflow;
+    # RoBERTa/BERT need it to avoid OOB position-embedding gather (position ids
+    # can reach num_tokens+1, which overflows max_position_embeddings).
+    if model_name.startswith("modernbert"):
+        tokenizer.model_max_length = max_position_embeddings
+    else:
+        tokenizer.model_max_length = max_tokenized_len
     name_or_path = str(pretrained_model) or ''
     config_obj = config_class(
         vocab_size=len(tokenizer),
@@ -118,14 +120,12 @@ def load_model(model_name: str,
         output_hidden_states=True,
         **config_settings
     )
-    # ModernBERT auto-compiles layers with torch.compile when triton is
-    # available; disable it for predictable/simple behaviour in training runs.
     if model_name.startswith("modernbert") and hasattr(config_obj, "reference_compile"):
         config_obj.reference_compile = False
     if pretrained_model:
         print(f"Loading from pretrained model {pretrained_model}")
         model = model_class.from_pretrained(
-            str(pretrained_model), config=config_obj)
+            str(pretrained_model), config=config_obj, _fast_init=False)
     else:
         print("Loading untrained model")
         model = model_class(config=config_obj)

@@ -46,7 +46,6 @@ training:
         per_device_eval_batch_size: 8
         fp16: true
         fp16_full_eval: true
-        eval_accumulation_steps: 1
         logging_steps: 50
         eval_steps: 300
         save_steps: 300
@@ -60,9 +59,9 @@ training:
         betas:
             - 0.9
             - 0.999
-        eps: 1.e-8
+        eps: 1.e-6
         weight_decay: 0
-        adam_epsilon: 1.e-8
+        adam_epsilon: 1.e-6
         max_grad_norm: 10
         warmup_steps: 200
 #         num_cooldown_steps: 2000

@@ -93,8 +93,12 @@ def get_plateau_schedule_with_warmup(
     return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
 
 
-def _get_optimizer(optimizer, model, num_param_groups, param_group_size, **kwargs):
-    if num_param_groups or param_group_size:
+def _get_optimizer(
+    optimizer, model, num_param_groups, param_group_size, params=None, **kwargs
+):
+    if params is not None:
+        param_groups = params
+    elif num_param_groups or param_group_size:
         param_groups = make_param_groups(model, num_param_groups, param_group_size)
     else:
         param_groups = model.parameters()
@@ -205,6 +209,59 @@ def make_param_groups(
     return param_groups
 
 
+def make_optimizer_and_scheduler(
+    model: torch.nn.Module,
+    training_settings: dict,
+    num_training_steps: int = 0,
+    trainable_only: bool = True,
+) -> tuple:
+    """Create an ``(optimizer, scheduler)`` pair for manual training loops.
+
+    When ``trainable_only`` is True only parameters with ``requires_grad=True``
+    get optimizer state, avoiding LAMB moments over a frozen base encoder.
+    """
+    optimizer_name = training_settings.get("optimizer", "lamb")
+    scheduler_name = training_settings.get("scheduler", "constant")
+
+    opt_kwargs = {
+        k: v
+        for k, v in training_settings.items()
+        if k in ["betas", "eps", "weight_decay", "learning_rate"]
+    }
+    sched_kwargs = {
+        k: v
+        for k, v in training_settings.items()
+        if k in ["delay_size", "num_cooldown_steps"]
+    }
+    if "warmup_steps" in training_settings:
+        sched_kwargs["num_warmup_steps"] = training_settings["warmup_steps"]
+
+    params = None
+    if trainable_only:
+        params = [p for p in model.parameters() if p.requires_grad]
+
+    opt = _get_optimizer(
+        optimizer_name,
+        model,
+        num_param_groups=training_settings.get("num_param_groups", None),
+        param_group_size=training_settings.get("param_group_size", None),
+        params=params,
+        **opt_kwargs,
+    )
+
+    num_param_groups = training_settings.get("num_param_groups", None)
+    if num_param_groups is None:
+        num_param_groups = 0
+    sched = _get_scheduler(
+        scheduler_name,
+        opt,
+        num_training_steps,
+        num_param_groups=num_param_groups + 1,
+        **sched_kwargs,
+    )
+    return opt, sched
+
+
 def make_trainer(
     model: torch.nn.Module,
     data_collator: callable,
@@ -253,11 +310,6 @@ def make_trainer(
         output_dir=str(output_dir),
         overwrite_output_dir=overwrite_output_dir,
         eval_strategy="steps",
-        # TODO: Figure out which setting for logging R2
-        # Skip accumulating eval logits on GPU when no custom metrics are
-        # requested (e.g. MLM pretrain). Accumulating full (batch, seq_len,
-        # vocab_size) logits across the eval set OOMs the GPU; with
-        # prediction_loss_only=True the eval loop returns loss only.
         prediction_loss_only=not bool(metrics),
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
@@ -270,8 +322,6 @@ def make_trainer(
         assert (
             scheduler is not None
         ), "If optimizer is not None, a scheduler must be supplied"
-        # TPU v3-8 exposes 8 logical devices even though `torch.cuda` reports 0;
-        # fall back to the CUDA device count on GPU machines and 1 otherwise.
         if os.environ.get("KAGGLE_TPU") or os.environ.get("TPU_NAME"):
             num_devices = 8
         else:

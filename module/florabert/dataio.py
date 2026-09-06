@@ -341,11 +341,16 @@ def load_datasets(
                     batched=True,
                     num_proc=1,
                 )
-            elif transformation == "log":
+            elif transformation in ("log", "log10"):
                 log_offset = log_offset or 0
-                print(f"Log transformation with offset {log_offset}")
+                fn = (
+                    preprocess_log10_transform
+                    if transformation == "log10"
+                    else preprocess_log_transform
+                )
+                print(f"{transformation} transformation with offset {log_offset}")
                 datasets = datasets.map(
-                    lambda x: preprocess_log_transform(x, log_offset),
+                    lambda x: fn(x, log_offset),
                     batched=True,
                     num_proc=n_workers,
                 )
@@ -475,6 +480,14 @@ def make_min_length_filter(min_seq_len: int, seq_key: str = None) -> dict:
 
 def preprocess_log_transform(examples: dict, eps=1) -> dict:
     """Log transform values in a list, offsetting by `eps` (default 1) to avoid 0s"""
+    log_transformed = []
+    for ex in examples["labels"]:
+        log_transformed.append([np.log(x + eps) for x in ex])
+    return {"labels": log_transformed}
+
+
+def preprocess_log10_transform(examples: dict, eps=1) -> dict:
+    """Log10 transform values in a list, offsetting by `eps` (default 1) to avoid 0s"""
     log_transformed = []
     for ex in examples["labels"]:
         log_transformed.append([np.log10(x + eps) for x in ex])

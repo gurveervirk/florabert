@@ -251,7 +251,7 @@ def compute_model_metrics_single_dataset(
         1. MSE
         2. MAE
         3. Classification accuracy (expressed/not expressed)
-        4. Pseudo-R2
+        4. R²
 
     Args:
         model (torch.nn.Module): the model to evaluate
@@ -314,6 +314,8 @@ def get_args(
     hyperparam_search_trials=None,
     transformation=None,
     output_mode=None,
+    learning_rate=None,
+    num_train_epochs=None,
 ) -> argparse.Namespace:
     """Use Python's ArgumentParser to create a namespace from (optional) user input
 
@@ -331,6 +333,8 @@ def get_args(
         hyperparam_search_trials (int, optional): number of trials to run hyperparameter search.
         transformation (str, optional): how to transform data. Defaults to None.
         output_mode (str, optional): default output mode for model and data transformation. Defaults to None.
+        learning_rate (float, optional): default finetuning learning rate.
+        num_train_epochs (int, optional): default finetuning epoch count.
     Returns:
         argparse.Namespace: parsed arguments
     """
@@ -433,7 +437,8 @@ def get_args(
         "--transformation",
         type=str,
         default=transformation,
-        help='How to transform the data. Options are "log", "boxcox"',
+        dest="transformation",
+        help='How to transform the data. Options are "log", "log10", "boxcox"',
     )
     parser.add_argument(
         "--freeze-base",
@@ -449,14 +454,16 @@ def get_args(
     parser.add_argument(
         "--learning-rate",
         type=float,
-        help="Learning rate for training. Default None",
-        default=None,
+        dest="learning_rate",
+        help="Learning rate for training",
+        default=learning_rate,
     )
     parser.add_argument(
         "--num-train-epochs",
         type=int,
         help="Number of epochs to train for",
-        default=None,
+        dest="num_train_epochs",
+        default=num_train_epochs,
     )
     parser.add_argument(
         "--search-metric",
@@ -577,20 +584,20 @@ def _ensure1d(arr: np.ndarray):
     return arr
 
 
-def compute_r2(
+def compute_pearson_r2(
     y_true: Union[np.ndarray, torch.Tensor], y_pred: Union[np.ndarray, torch.Tensor]
 ) -> float:
-    """Compute coefficient of determination between `y_true` and `y_pred`.
+    """Compute squared Pearson correlation between `y_true` and `y_pred`.
 
     Computed as pearson's rho ** 2
     """
     return np.corrcoef(_ensure1d(y_true), _ensure1d(y_pred))[1, 0] ** 2
 
 
-def compute_pseudo_r2(
+def compute_r2(
     y_true: Union[np.ndarray, torch.Tensor], y_pred: Union[np.ndarray, torch.Tensor]
 ) -> float:
-    """Compute pseudo-r2 between `y_true` and `y_pred`.
+    """Compute conventional regression R² between `y_true` and `y_pred`.
 
     Computed as SSR / SST
     """

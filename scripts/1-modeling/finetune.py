@@ -92,7 +92,7 @@ def main():
         pretrained_model=config.model_output_dir(DEFAULT_MODEL, "language-model"),
         tokenizer_dir=config.tokenizer_dir_for_model(DEFAULT_MODEL),
         model_name=DEFAULT_MODEL,
-        log_offset=1,
+        log_offset=config.settings["training"]["finetune"].get("log_offset", 0.001),
         preprocessor=PREPROCESSOR,
         transformation=config.settings["training"]["finetune"]["transformation"],
         learning_rate=config.settings["training"]["finetune"]["learning_rate"],

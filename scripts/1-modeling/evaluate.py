@@ -40,7 +40,7 @@ def load_data(tokenizer, test_data) -> Dataset:
     return datasets["train"]
 
 
-def get_metrics(num_tissues, transformation="log") -> tuple:
+def get_metrics(num_tissues, transformation="log", log_offset=0.001) -> tuple:
     metric_types = ["mse", "mae", "pearson_r2", "r2"]
     metric_names = [
         *[
@@ -53,13 +53,16 @@ def get_metrics(num_tissues, transformation="log") -> tuple:
     metric_fns = [
         *[
             metrics.make_tissue_loss(
-                i, metric=metric, transformation=transformation
+                i,
+                metric=metric,
+                transformation=transformation,
+                log_offset=log_offset,
             )
             for metric in metric_types
             for i in range(num_tissues)
         ],
         torch.nn.MSELoss(),
-        metrics.make_mae_loss(transformation),
+        metrics.make_mae_loss(transformation, log_offset),
         utils.compute_pearson_r2,
         utils.compute_r2,
     ]
@@ -99,7 +102,7 @@ def main():
         pretrained_model=config.model_output_dir(DEFAULT_MODEL, "prediction-model") / "final",
         tokenizer_dir=config.tokenizer_dir_for_model(DEFAULT_MODEL),
         model_name=DEFAULT_MODEL,
-        log_offset=1,
+        log_offset=config.settings["training"]["finetune"].get("log_offset", 0.001),
         preprocessor=PREPROCESSOR,
         transformation="log",
     )
@@ -147,7 +150,9 @@ def main():
     trg_true, trg_pred = metrics.get_predictions(model, dataset_test)
 
     metric_names, metric_fns = get_metrics(
-        settings["num_labels"], transformation=args.transformation
+        settings["num_labels"],
+        transformation=args.transformation,
+        log_offset=args.log_offset,
     )
 
     print("Evaluating")

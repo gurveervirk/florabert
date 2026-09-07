@@ -58,12 +58,13 @@ training:
 #         eval_accumulation_steps: 64
         learning_rate: 5.e-5
         transformation: "log"
+        log_offset: 0.001
         # learning_rate: 1.e-1
         # lr: 1.e-3
         betas:
             - 0.9
             - 0.999
-        eps: 1.e-6
+        eps: 1.e-8
         weight_decay: 0
         adam_epsilon: 1.e-6
         max_grad_norm: 10

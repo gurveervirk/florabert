@@ -460,6 +460,11 @@ def get_args(
         help="Mixed-precision mode for finetuning. Use 'bf16' for bfloat16.",
     )
     parser.add_argument(
+        "--debug-numerics",
+        action="store_true",
+        help="Run expensive per-step finite-value checks after gradient unscaling.",
+    )
+    parser.add_argument(
         "--learning-rate",
         type=float,
         dest="learning_rate",

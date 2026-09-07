@@ -153,6 +153,7 @@ def main():
     training_settings["precision"] = args.precision
     training_settings["fp16"] = args.precision == "fp16"
     training_settings["bf16"] = args.precision == "bf16"
+    debug_numerics = args.debug_numerics or training_settings.get("debug_numerics", False)
     if args.learning_rate is not None:
         training_settings["learning_rate"] = args.learning_rate
     if args.num_train_epochs is not None:
@@ -240,28 +241,33 @@ def main():
                     f"Non-finite logits before backward at training step {global_step}"
                 )
             accelerator.backward(loss)
-            bad_grad = _first_nonfinite_tensor(
-                (name, parameter.grad)
-                for name, parameter in model.named_parameters()
-                if parameter.grad is not None
-            )
-            if bad_grad is not None:
-                raise RuntimeError(
-                    f"Non-finite gradient before optimizer step at training step "
-                    f"{global_step}: {bad_grad}"
-                )
             grad_norm = None
             if "max_grad_norm" in training_settings:
                 grad_norm = accelerator.clip_grad_norm_(
                     model.parameters(), training_settings["max_grad_norm"]
                 ).item()
-                if not np.isfinite(grad_norm):
+                if debug_numerics and not np.isfinite(grad_norm):
                     raise RuntimeError(
                         f"Non-finite gradient norm at training step {global_step}: "
                         f"{grad_norm}"
                     )
+            else:
+                # Ensure fp16 gradients are unscaled before optional inspection.
+                accelerator.unscale_gradients()
+            if debug_numerics:
+                bad_grad = _first_nonfinite_tensor(
+                    (name, parameter.grad)
+                    for name, parameter in model.named_parameters()
+                    if parameter.grad is not None
+                )
+                if bad_grad is not None:
+                    raise RuntimeError(
+                        f"Non-finite gradient before optimizer step at training step "
+                        f"{global_step}: {bad_grad}"
+                    )
             optimizer.step()
-            _assert_finite_model(model, f"optimizer step {global_step}")
+            if debug_numerics:
+                _assert_finite_model(model, f"optimizer step {global_step}")
             scheduler.step()
             progress_bar.update(1)
 

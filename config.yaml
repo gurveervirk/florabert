@@ -48,6 +48,7 @@ training:
         bf16: false
         fp16_full_eval: true
         precision: "fp16"
+        debug_numerics: false
         logging_steps: 50
         eval_steps: 300
         save_steps: 300

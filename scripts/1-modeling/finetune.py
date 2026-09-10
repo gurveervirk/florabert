@@ -2,23 +2,25 @@
 Fine-tuning the transformer model on the downstream gene expression prediction task
 using accelerate for manual train/eval loops.
 """
+import json
 import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-sys.path.append('/kaggle/working/florabert')
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from tqdm.auto import tqdm
 
-import wandb
+try:
+    import wandb
+except ImportError:  # pragma: no cover - optional for offline/local runs
+    wandb = None
 
 from module.florabert import config, utils, training, dataio
 from module.florabert import transformers as tr
-from module.florabert.utils import compute_r2, compute_mse
 
 
 DATA_DIR = config.data_final / "transformer" / "genex" / "nam"
@@ -82,6 +84,64 @@ def _tensor_summary(tensor):
     )
 
 
+def _population_std(values):
+    """Return a JSON-friendly population standard deviation."""
+    values = np.asarray(values, dtype=np.float64)
+    return float(np.std(values, ddof=0)) if values.size else float("nan")
+
+
+def _metric_triplet(targets, predictions):
+    """Compute the fixed regression metrics for one target vector."""
+    targets = np.asarray(targets, dtype=np.float64)
+    predictions = np.asarray(predictions, dtype=np.float64)
+    return {
+        "mse": float(np.mean((targets - predictions) ** 2)),
+        "r2": float(utils.compute_r2(targets, predictions)),
+        "pearson_r2": float(utils.compute_pearson_r2(targets, predictions)),
+        "prediction_mean": float(np.mean(predictions)),
+        "prediction_std": _population_std(predictions),
+        "target_mean": float(np.mean(targets)),
+        "target_std": _population_std(targets),
+    }
+
+
+def _evaluation_metrics(labels, predictions):
+    """Return overall and per-tissue metrics in transformed target space."""
+    labels_np = labels.detach().cpu().numpy()
+    predictions_np = predictions.detach().cpu().numpy()
+    overall = _metric_triplet(labels_np.ravel(), predictions_np.ravel())
+    per_tissue = {}
+    for tissue_idx in range(labels_np.shape[1]):
+        tissue = (
+            config.tissues[tissue_idx]
+            if tissue_idx < len(config.tissues)
+            else f"tissue_{tissue_idx}"
+        )
+        per_tissue[tissue] = _metric_triplet(
+            labels_np[:, tissue_idx], predictions_np[:, tissue_idx]
+        )
+    return {"overall": overall, "per_tissue": per_tissue}
+
+
+def _load_previous_best(metrics_path):
+    """Recover the best validation MSE when resuming a regression run."""
+    if not metrics_path.is_file():
+        return float("inf"), None
+    best_mse = float("inf")
+    best_epoch = None
+    with metrics_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            overall = record.get("overall", {})
+            mse = overall.get("mse")
+            if mse is not None and mse < best_mse:
+                best_mse = float(mse)
+                best_epoch = record.get("epoch")
+    return best_mse, best_epoch
+
+
 def main():
     args = utils.get_args(
         data_dir=DATA_DIR,
@@ -106,8 +166,18 @@ def main():
         args.output_dir = config.model_output_dir(args.model_name, "prediction-model")
     if "--tokenizer-dir" not in sys.argv:
         args.tokenizer_dir = config.tokenizer_dir_for_model(args.model_name)
-    if "--pretrained-model" not in sys.argv:
+    if args.resume_from_checkpoint and "--pretrained-model" not in sys.argv:
+        args.pretrained_model = args.resume_from_checkpoint
+    elif "--pretrained-model" not in sys.argv:
         args.pretrained_model = config.model_output_dir(args.model_name, "language-model")
+
+    if args.resume_from_checkpoint:
+        if not args.resume_from_checkpoint.is_dir():
+            raise FileNotFoundError(
+                f"Regression resume checkpoint does not exist: "
+                f"{args.resume_from_checkpoint}"
+            )
+        print(f"Selected regression resume checkpoint: {args.resume_from_checkpoint}")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     print(args)
@@ -141,10 +211,14 @@ def main():
         transformation=args.transformation,
         discretize=(args.output_mode == "classification"),
         nshards=args.nshards,
+        n_workers=args.n_workers or min(os.cpu_count() or 1, 8),
     )
     dataset_train = datasets["train"].remove_columns(["sequence"])
     dataset_eval = datasets["eval"].remove_columns(["sequence"])
-    print(f"Loaded training data with {len(dataset_train)} examples")
+    print(
+        f"Loaded training data with {len(dataset_train)} examples and "
+        f"validation data with {len(dataset_eval)} examples"
+    )
 
     data_collator = dataio.load_data_collator("pred")
     training_settings = dict(config.settings["training"]["finetune"])
@@ -193,7 +267,12 @@ def main():
         train_dataloader, eval_dataloader, model, optimizer, scheduler
     )
 
-    if accelerator.is_main_process:
+    wandb_enabled = (
+        wandb is not None
+        and os.environ.get("WANDB_DISABLED", "").lower()
+        not in {"1", "true", "yes"}
+    )
+    if accelerator.is_main_process and wandb_enabled:
         wandb.init(
             project=os.environ.get("WANDB_PROJECT", "florabert"),
             config={
@@ -209,19 +288,45 @@ def main():
                 "train_size": len(dataset_train),
                 "eval_size": len(dataset_eval),
                 "num_trainable_params": num_params,
+                **training_settings,
             },
         )
+    elif accelerator.is_main_process:
+        print("W&B logging disabled (install wandb and unset WANDB_DISABLED to enable)")
 
+    start_epoch = 0
+    global_step = 0
+    metrics_path = args.output_dir / "metrics.jsonl"
+    best_val_mse, best_epoch = _load_previous_best(metrics_path)
+    if args.resume_from_checkpoint:
+        state_path = args.resume_from_checkpoint / "training_state.pt"
+        if not state_path.is_file():
+            raise FileNotFoundError(
+                "Regression resume requires training_state.pt alongside the model "
+                f"checkpoint: {state_path}"
+            )
+        state = torch.load(state_path, map_location="cpu")
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
+        start_epoch = int(state.get("epoch", 0))
+        global_step = int(state.get("global_step", 0))
+        accelerator.print(
+            f"Restored optimizer/scheduler state at epoch {start_epoch}, "
+            f"global step {global_step}"
+        )
+
+    steps_per_epoch = int(
+        np.ceil(len(dataset_train) / (train_batch_size * accelerator.num_processes))
+    )
+    num_training_steps = steps_per_epoch * num_epochs
     progress_bar = tqdm(
-        range(num_training_steps),
+        range(global_step, num_training_steps),
         disable=not accelerator.is_local_main_process,
     )
-    steps_per_epoch = num_training_steps // num_epochs
     logging_steps = int(training_settings.get("logging_steps", 50))
-    global_step = 0
     running_loss = 0.0
     accelerator.print("Starting training")
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         model.train()
         for batch in train_dataloader:
             optimizer.zero_grad()
@@ -278,7 +383,7 @@ def main():
                 if accelerator.is_main_process:
                     logits = outputs.logits.detach().float()
                     log = {
-                        "epoch": epoch + (global_step % steps_per_epoch) / steps_per_epoch,
+                        "epoch": epoch + (global_step % max(steps_per_epoch, 1)) / max(steps_per_epoch, 1),
                         "loss": running_loss / logging_steps,
                         "learning_rate": lr,
                         "step": global_step,
@@ -289,7 +394,8 @@ def main():
                     if grad_norm is not None:
                         log["grad_norm"] = grad_norm
                     log.update(_head_diagnostics(accelerator.unwrap_model(model), optimizer))
-                    wandb.log(log)
+                    if wandb_enabled:
+                        wandb.log(log)
                 running_loss = 0.0
 
         model.eval()
@@ -300,41 +406,111 @@ def main():
             inputs = {k: v for k, v in batch.items() if k in MODEL_INPUT_KEYS}
             with torch.no_grad():
                 outputs = model(**inputs)
-            all_predictions.append(accelerator.gather(outputs.logits).detach().cpu())
-            all_labels.append(accelerator.gather(labels).detach().cpu())
+            gathered_predictions, gathered_labels = accelerator.gather_for_metrics(
+                (outputs.logits, labels)
+            )
+            all_predictions.append(gathered_predictions.detach().cpu())
+            all_labels.append(gathered_labels.detach().cpu())
 
-        all_predictions = torch.cat(all_predictions)[: len(dataset_eval)]
-        all_labels = torch.cat(all_labels)[: len(dataset_eval)]
+        all_predictions = torch.cat(all_predictions)
+        all_labels = torch.cat(all_labels)
 
-        eval_mse = compute_mse(all_labels, all_predictions)
-        eval_r2 = compute_r2(all_labels, all_predictions)
-        prediction_mean = float(all_predictions.float().mean())
-        prediction_std = float(all_predictions.float().std())
+        evaluation = _evaluation_metrics(all_labels, all_predictions)
+        overall = evaluation["overall"]
+        eval_mse = overall["mse"]
+        eval_r2 = overall["r2"]
         accelerator.print(
-            f"epoch {epoch}: eval mse={eval_mse:.4f} r2={eval_r2:.4f} "
-            f"pred_mean={prediction_mean:.6f} pred_std={prediction_std:.6f}"
+            f"epoch {epoch + 1}: validation mse={eval_mse:.4f} "
+            f"r2={eval_r2:.4f} pearson_r2={overall['pearson_r2']:.4f} "
+            f"pred_mean={overall['prediction_mean']:.6f} "
+            f"pred_std={overall['prediction_std']:.6f} "
+            f"target_mean={overall['target_mean']:.6f} "
+            f"target_std={overall['target_std']:.6f}"
         )
+        for tissue, tissue_metrics in evaluation["per_tissue"].items():
+            accelerator.print(
+                f"  {tissue}: mse={tissue_metrics['mse']:.4f} "
+                f"r2={tissue_metrics['r2']:.4f} "
+                f"pearson_r2={tissue_metrics['pearson_r2']:.4f} "
+                f"pred_mean={tissue_metrics['prediction_mean']:.6f} "
+                f"pred_std={tissue_metrics['prediction_std']:.6f} "
+                f"target_mean={tissue_metrics['target_mean']:.6f} "
+                f"target_std={tissue_metrics['target_std']:.6f}"
+            )
         if accelerator.is_main_process:
+            with metrics_path.open("a", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "epoch": epoch + 1,
+                        "overall": overall,
+                        "per_tissue": evaluation["per_tissue"],
+                    },
+                    handle,
+                )
+                handle.write("\n")
             eval_log = _head_diagnostics(accelerator.unwrap_model(model), optimizer)
             eval_log.update(
                 {
                     "epoch": epoch + 1,
                     "eval/mse": float(eval_mse),
                     "eval/r2": float(eval_r2),
-                    "eval/pred_mean": prediction_mean,
-                    "eval/pred_std": prediction_std,
+                    "eval/pearson_r2": overall["pearson_r2"],
+                    "eval/pred_mean": overall["prediction_mean"],
+                    "eval/pred_std": overall["prediction_std"],
+                    "eval/target_mean": overall["target_mean"],
+                    "eval/target_std": overall["target_std"],
                 }
             )
-            wandb.log(
-                eval_log
-            )
+            if wandb_enabled:
+                wandb.log(eval_log)
 
         unwrapped_model = accelerator.unwrap_model(model)
+        epoch_dir = args.output_dir / f"epoch_{epoch}"
+        accelerator.wait_for_everyone()
         unwrapped_model.save_pretrained(
-            args.output_dir / f"epoch_{epoch}",
+            epoch_dir,
             is_main_process=accelerator.is_main_process,
             save_function=accelerator.save,
         )
+        if accelerator.is_main_process:
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "global_step": global_step,
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                },
+                epoch_dir / "training_state.pt",
+            )
+        accelerator.wait_for_everyone()
+
+        if eval_mse < best_val_mse:
+            best_val_mse = eval_mse
+            best_epoch = epoch + 1
+            accelerator.wait_for_everyone()
+            unwrapped_model.save_pretrained(
+                args.output_dir / "best",
+                is_main_process=accelerator.is_main_process,
+                save_function=accelerator.save,
+            )
+            if accelerator.is_main_process:
+                with (args.output_dir / "best_metrics.json").open(
+                    "w", encoding="utf-8"
+                ) as handle:
+                    json.dump(
+                        {
+                            "epoch": best_epoch,
+                            "validation": evaluation,
+                            "checkpoint": str(args.output_dir / "best"),
+                        },
+                        handle,
+                        indent=2,
+                    )
+                print(
+                    f"New best validation checkpoint: {args.output_dir / 'best'} "
+                    f"(epoch {best_epoch}, mse={best_val_mse:.6f})"
+                )
+            accelerator.wait_for_everyone()
 
     print("Saving model")
     unwrapped_model = accelerator.unwrap_model(model)
@@ -343,8 +519,17 @@ def main():
         is_main_process=accelerator.is_main_process,
         save_function=accelerator.save,
     )
+    if best_epoch is None:
+        raise RuntimeError(
+            "No validation checkpoint was produced; refusing to report a final "
+            "regression model as the best model."
+        )
+    accelerator.print(
+        f"Best validation checkpoint: {args.output_dir / 'best'} "
+        f"(epoch {best_epoch}, mse={best_val_mse:.6f})"
+    )
 
-    if accelerator.is_main_process:
+    if accelerator.is_main_process and wandb_enabled:
         wandb.finish()
 
 

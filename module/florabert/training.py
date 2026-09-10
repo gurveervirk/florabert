@@ -4,7 +4,7 @@ training.py
 Functions and classes for training pytorch models.
 """
 import os
-from pathlib import PosixPath
+from pathlib import Path, PosixPath
 from typing import Callable, Union
 import multiprocessing as mp
 import inspect
@@ -447,15 +447,28 @@ def make_trainer(
 
 def do_training(trainer, args, output_dir):
     """
-    Run HuggingFace trainer, loading latest checkpoint if `args.warmstart`
-    is True.
+    Run HuggingFace Trainer, optionally resuming from an explicit checkpoint or
+    the latest checkpoint in ``output_dir``.
     """
-    if args.warmstart:
-        ckpt = get_latest_checkpoint(output_dir)
-        print(f"Resuming training from {ckpt}")
-        trainer.train(str(ckpt))
+    checkpoint = getattr(args, "resume_from_checkpoint", None)
+    if checkpoint is None and args.warmstart:
+        checkpoint = get_latest_checkpoint(output_dir)
+        if checkpoint is None:
+            raise FileNotFoundError(
+                f"--warmstart was requested, but no checkpoint-* directory exists in "
+                f"{output_dir}"
+            )
+
+    if checkpoint is not None:
+        checkpoint = Path(checkpoint)
+        if not checkpoint.is_dir():
+            raise FileNotFoundError(
+                f"Requested resume checkpoint does not exist or is not a directory: "
+                f"{checkpoint}"
+            )
+        print(f"Resuming training from {checkpoint}")
+        trainer.train(resume_from_checkpoint=str(checkpoint))
     else:
-#         with torch.no_grad():
         trainer.train()
 
     return trainer

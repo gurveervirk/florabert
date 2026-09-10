@@ -317,6 +317,8 @@ def get_args(
     learning_rate=None,
     num_train_epochs=None,
     precision="fp16",
+    resume_from_checkpoint=None,
+    n_workers=None,
 ) -> argparse.Namespace:
     """Use Python's ArgumentParser to create a namespace from (optional) user input
 
@@ -336,6 +338,8 @@ def get_args(
         output_mode (str, optional): default output mode for model and data transformation. Defaults to None.
         learning_rate (float, optional): default finetuning learning rate.
         num_train_epochs (int, optional): default finetuning epoch count.
+        resume_from_checkpoint (str, optional): checkpoint to resume training from.
+        n_workers (int, optional): number of dataset tokenization workers.
     Returns:
         argparse.Namespace: parsed arguments
     """
@@ -376,7 +380,7 @@ def get_args(
     parser.add_argument(
         "--model-name",
         type=str,
-        help='Name of model. Supported values are "roberta-lm", "roberta-pred", "roberta-pred-mean-pool", "dnabert-lm", "dnabert-pred", "dnabert-pred-mean-pool"',
+        help='Name of model. Supported values include "roberta-lm", "roberta-pred-mean-pool", "modernbert-lm", "modernbert-pred-mean-pool", and DNABERT variants.',
         default=model_name,
     )
     parser.add_argument(
@@ -386,10 +390,16 @@ def get_args(
         default=(str(pretrained_model) if pretrained_model else None),
     )
     parser.add_argument(
+        "--resume-from-checkpoint",
+        type=str,
+        help="Checkpoint directory containing model/training state to resume.",
+        default=resume_from_checkpoint,
+    )
+    parser.add_argument(
         "--tokenizer-dir",
         type=str,
         help="Directory containing necessary files to instantiate pretrained tokenizer.",
-        default=str(tokenizer_dir),
+        default=(str(tokenizer_dir) if tokenizer_dir else None),
     )
     parser.add_argument(
         "--log-offset",
@@ -427,6 +437,12 @@ def get_args(
         type=int,
         default=None,
         help="Number of shards to divide eval data into.",
+    )
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=n_workers,
+        help="Number of workers used while tokenizing/loading datasets.",
     )
     parser.add_argument(
         "--threshold",
@@ -490,8 +506,15 @@ def get_args(
     if args.pretrained_model and not args.pretrained_model.startswith("/"):
         args.pretrained_model = str(Path.cwd() / args.pretrained_model)
 
+    if args.resume_from_checkpoint and not args.resume_from_checkpoint.startswith("/"):
+        args.resume_from_checkpoint = str(Path.cwd() / args.resume_from_checkpoint)
+
     args.data_dir = Path(args.data_dir)
     args.output_dir = Path(args.output_dir)
+    args.tokenizer_dir = Path(args.tokenizer_dir) if args.tokenizer_dir else None
+    args.resume_from_checkpoint = (
+        Path(args.resume_from_checkpoint) if args.resume_from_checkpoint else None
+    )
 
     args.train_data = _get_fpath_if_not_none(args.data_dir, args.train_data)
     args.eval_data = _get_fpath_if_not_none(args.data_dir, args.eval_data)
@@ -516,15 +539,19 @@ def _get_fpath_if_not_none(
     return None
 
 
-def get_latest_checkpoint(directory: PosixPath) -> PosixPath:
-    """Return the latest checkpoint in `directory` (with the highest number)."""
-    checkpoints = list(directory.glob("checkpoint-*"))
-    max_ckpt = -1
-    for i, ckpt in enumerate(checkpoints):
-        num = int(ckpt.name.split("-")[-1])
-        if num > max_ckpt:
-            max_ckpt = num
-    return directory / f"checkpoint-{max_ckpt}"
+def get_latest_checkpoint(directory: PosixPath) -> Union[None, PosixPath]:
+    """Return the latest numbered Trainer checkpoint, or ``None`` if absent."""
+    checkpoints = []
+    for checkpoint in Path(directory).glob("checkpoint-*"):
+        try:
+            number = int(checkpoint.name.rsplit("-", 1)[-1])
+        except ValueError:
+            continue
+        if checkpoint.is_dir():
+            checkpoints.append((number, checkpoint))
+    if not checkpoints:
+        return None
+    return max(checkpoints, key=lambda item: item[0])[1]
 
 
 def count_model_parameters(model: torch.nn.Module, trainable_only: bool = True) -> int:

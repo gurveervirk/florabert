@@ -4,6 +4,9 @@ using accelerate for manual train/eval loops.
 """
 import os
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.append('/kaggle/working/florabert')
 import numpy as np
 import torch
@@ -37,6 +40,48 @@ def load_model(args, settings):
     )
 
 
+def _head_diagnostics(model, optimizer):
+    """Return prediction-head norms and LAMB state for debugging stalled runs."""
+    head = model.classifier
+    output_layer = head.out_proj
+    weight = output_layer.weight
+    state = optimizer.state.get(weight, {})
+
+    def scalar(name):
+        value = state.get(name)
+        return float(value.detach().float().cpu()) if value is not None else None
+
+    return {
+        "head/weight_norm": float(weight.detach().float().norm().cpu()),
+        "head/bias_norm": float(output_layer.bias.detach().float().norm().cpu()),
+        "lamb/weight_norm": scalar("weight_norm"),
+        "lamb/adam_norm": scalar("adam_norm"),
+        "lamb/trust_ratio": scalar("trust_ratio"),
+    }
+
+
+def _first_nonfinite_tensor(tensors):
+    """Return the first named tensor containing NaN or Inf values."""
+    for name, tensor in tensors:
+        if tensor is not None and not torch.isfinite(tensor.detach()).all():
+            return name
+    return None
+
+
+def _assert_finite_model(model, stage):
+    name = _first_nonfinite_tensor(model.named_parameters())
+    if name is not None:
+        raise RuntimeError(f"Non-finite model parameter after {stage}: {name}")
+
+
+def _tensor_summary(tensor):
+    values = tensor.detach().float()
+    return (
+        f"min={values.min().item():.6g}, max={values.max().item():.6g}, "
+        f"absmax={values.abs().max().item():.6g}"
+    )
+
+
 def main():
     args = utils.get_args(
         data_dir=DATA_DIR,
@@ -47,9 +92,12 @@ def main():
         pretrained_model=config.model_output_dir(DEFAULT_MODEL, "language-model"),
         tokenizer_dir=config.tokenizer_dir_for_model(DEFAULT_MODEL),
         model_name=DEFAULT_MODEL,
-        log_offset=1,
+        log_offset=config.settings["training"]["finetune"].get("log_offset", 0.001),
         preprocessor=PREPROCESSOR,
-        transformation="log10",
+        transformation=config.settings["training"]["finetune"]["transformation"],
+        learning_rate=config.settings["training"]["finetune"]["learning_rate"],
+        num_train_epochs=config.settings["training"]["finetune"]["num_train_epochs"],
+        precision=config.settings["training"]["finetune"].get("precision", "bf16"),
         hyperparam_search_metrics="mse",
         hyperparam_search_trials=10,
     )
@@ -67,6 +115,7 @@ def main():
 
     print("Making model")
     config_obj, tokenizer, model = load_model(args, settings)
+    _assert_finite_model(model, "model load")
     if args.freeze_base:
         print("Freezing base")
         utils.freeze_base(model)
@@ -98,7 +147,13 @@ def main():
     print(f"Loaded training data with {len(dataset_train)} examples")
 
     data_collator = dataio.load_data_collator("pred")
-    training_settings = config.settings["training"]["finetune"]
+    training_settings = dict(config.settings["training"]["finetune"])
+    # Keep the displayed and logged precision aligned with the Accelerator
+    # argument; the legacy config flags may still contain fp16: true.
+    training_settings["precision"] = args.precision
+    training_settings["fp16"] = args.precision == "fp16"
+    training_settings["bf16"] = args.precision == "bf16"
+    debug_numerics = args.debug_numerics or training_settings.get("debug_numerics", False)
     if args.learning_rate is not None:
         training_settings["learning_rate"] = args.learning_rate
     if args.num_train_epochs is not None:
@@ -109,7 +164,9 @@ def main():
     train_batch_size = training_settings.get("per_device_train_batch_size", 64)
     eval_batch_size = training_settings.get("per_device_eval_batch_size", 8)
 
-    accelerator = Accelerator(mixed_precision="fp16")
+    accelerator = Accelerator(mixed_precision=args.precision)
+    selected_precision = accelerator.state.mixed_precision
+    accelerator.print(f"Selected mixed precision: {selected_precision}")
 
     train_dataloader = DataLoader(
         dataset_train,
@@ -140,12 +197,18 @@ def main():
         wandb.init(
             project=os.environ.get("WANDB_PROJECT", "florabert"),
             config={
+                **training_settings,
                 "model_name": args.model_name,
                 "transformation": args.transformation,
+                # Record the effective Accelerator setting, not the legacy
+                # TrainingArguments-style fp16 flag from config.yaml.
+                "precision": selected_precision,
+                "mixed_precision": selected_precision,
+                "fp16": selected_precision == "fp16",
+                "bf16": selected_precision == "bf16",
                 "train_size": len(dataset_train),
                 "eval_size": len(dataset_eval),
                 "num_trainable_params": num_params,
-                **training_settings,
             },
         )
 
@@ -163,15 +226,48 @@ def main():
         for batch in train_dataloader:
             optimizer.zero_grad()
             inputs = {k: v for k, v in batch.items() if k in MODEL_INPUT_KEYS}
+            if not torch.isfinite(inputs["labels"]).all():
+                raise RuntimeError(f"Non-finite labels at training step {global_step}")
             outputs = model(**inputs)
             loss = outputs.loss
+            if loss is None or not torch.isfinite(loss.detach()).all():
+                raise RuntimeError(
+                    f"Non-finite loss before backward at training step {global_step}: "
+                    f"{loss}; labels({_tensor_summary(inputs['labels'])}); "
+                    f"logits({_tensor_summary(outputs.logits)})"
+                )
+            if not torch.isfinite(outputs.logits.detach()).all():
+                raise RuntimeError(
+                    f"Non-finite logits before backward at training step {global_step}"
+                )
             accelerator.backward(loss)
             grad_norm = None
             if "max_grad_norm" in training_settings:
                 grad_norm = accelerator.clip_grad_norm_(
                     model.parameters(), training_settings["max_grad_norm"]
                 ).item()
+                if debug_numerics and not np.isfinite(grad_norm):
+                    raise RuntimeError(
+                        f"Non-finite gradient norm at training step {global_step}: "
+                        f"{grad_norm}"
+                    )
+            else:
+                # Ensure fp16 gradients are unscaled before optional inspection.
+                accelerator.unscale_gradients()
+            if debug_numerics:
+                bad_grad = _first_nonfinite_tensor(
+                    (name, parameter.grad)
+                    for name, parameter in model.named_parameters()
+                    if parameter.grad is not None
+                )
+                if bad_grad is not None:
+                    raise RuntimeError(
+                        f"Non-finite gradient before optimizer step at training step "
+                        f"{global_step}: {bad_grad}"
+                    )
             optimizer.step()
+            if debug_numerics:
+                _assert_finite_model(model, f"optimizer step {global_step}")
             scheduler.step()
             progress_bar.update(1)
 
@@ -180,14 +276,19 @@ def main():
             if global_step % logging_steps == 0:
                 lr = scheduler.get_last_lr()[0]
                 if accelerator.is_main_process:
+                    logits = outputs.logits.detach().float()
                     log = {
                         "epoch": epoch + (global_step % steps_per_epoch) / steps_per_epoch,
                         "loss": running_loss / logging_steps,
                         "learning_rate": lr,
                         "step": global_step,
+                        "precision": selected_precision,
+                        "train/logit_mean": float(logits.mean().cpu()),
+                        "train/logit_std": float(logits.std().cpu()),
                     }
                     if grad_norm is not None:
                         log["grad_norm"] = grad_norm
+                    log.update(_head_diagnostics(accelerator.unwrap_model(model), optimizer))
                     wandb.log(log)
                 running_loss = 0.0
 
@@ -207,14 +308,25 @@ def main():
 
         eval_mse = compute_mse(all_labels, all_predictions)
         eval_r2 = compute_r2(all_labels, all_predictions)
-        accelerator.print(f"epoch {epoch}: eval mse={eval_mse:.4f} r2={eval_r2:.4f}")
+        prediction_mean = float(all_predictions.float().mean())
+        prediction_std = float(all_predictions.float().std())
+        accelerator.print(
+            f"epoch {epoch}: eval mse={eval_mse:.4f} r2={eval_r2:.4f} "
+            f"pred_mean={prediction_mean:.6f} pred_std={prediction_std:.6f}"
+        )
         if accelerator.is_main_process:
-            wandb.log(
+            eval_log = _head_diagnostics(accelerator.unwrap_model(model), optimizer)
+            eval_log.update(
                 {
                     "epoch": epoch + 1,
                     "eval/mse": float(eval_mse),
                     "eval/r2": float(eval_r2),
+                    "eval/pred_mean": prediction_mean,
+                    "eval/pred_std": prediction_std,
                 }
+            )
+            wandb.log(
+                eval_log
             )
 
         unwrapped_model = accelerator.unwrap_model(model)

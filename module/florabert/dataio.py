@@ -7,7 +7,7 @@ import multiprocessing as mp
 import os
 import random
 import time
-from pathlib import PosixPath
+from pathlib import Path, PosixPath
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -169,7 +169,7 @@ def _tokenize_marker_dir(
     HuggingFace map cache.
     """
     name = getattr(tokenizer, "name_or_path", None) or type(tokenizer).__name__
-    tag = str(PosixPath(name).stem) if name else "tokenizer"
+    tag = str(Path(name).stem) if name else "tokenizer"
     source = "".join(str(v) for v in data_files.values())
     digest = hashlib.md5(
         f"{tag}|{tokenizer.model_max_length}|{seq_key}|{nshards}|{min_seq_len}|{filter_empty}|{kmer}|{position_buckets}|{source}".encode()
@@ -305,6 +305,7 @@ def load_datasets(
         (marker_dir / "_DONE").unlink(missing_ok=True)
 
     if file_type != "text":
+        print(f"[labels] converting string labels with n_workers={n_workers}")
         datasets = datasets.map(
             utils.convert_str_to_tnsr, batched=True, num_proc=n_workers
         )
@@ -343,7 +344,11 @@ def load_datasets(
                 )
             elif transformation in ("log", "log10"):
                 log_offset = log_offset or 0
-                fn = preprocess_log10_transform if transformation == "log10" else preprocess_log_transform
+                fn = (
+                    preprocess_log10_transform
+                    if transformation == "log10"
+                    else preprocess_log_transform
+                )
                 print(f"{transformation} transformation with offset {log_offset}")
                 datasets = datasets.map(
                     lambda x: fn(x, log_offset),
@@ -478,7 +483,7 @@ def preprocess_log_transform(examples: dict, eps=1) -> dict:
     """Log transform values in a list, offsetting by `eps` (default 1) to avoid 0s"""
     log_transformed = []
     for ex in examples["labels"]:
-        log_transformed.append([np.log10(x + eps) for x in ex])
+        log_transformed.append([np.log(x + eps) for x in ex])
     return {"labels": log_transformed}
 
 

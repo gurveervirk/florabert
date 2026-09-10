@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from transformers import default_data_collator
 from tqdm import tqdm
 
-from .utils import compute_pseudo_r2, compute_r2
+from .utils import compute_pearson_r2, compute_r2
 
 
 def get_predictions(
@@ -77,12 +77,15 @@ def evaluate_model(
     return [metric_fn(trg_pred, trg_true) for metric_fn in metric_fns]
 
 
-def make_tissue_loss(tissue_idx, metric="mse", transformation="log10") -> callable:
+def make_tissue_loss(
+    tissue_idx, metric="mse", transformation="log", log_offset=0.001
+) -> callable:
     """Make a tissue-specific loss function
 
     Args:
         tissue_idx ([type]): index of the tissue
         metric (str, optional): metric to evaluate. Defaults to 'mse'.
+        transformation (str, optional): target transformation used for original-scale MAE.
 
     Returns:
         callable: tissue-specific loss function
@@ -92,24 +95,24 @@ def make_tissue_loss(tissue_idx, metric="mse", transformation="log10") -> callab
         if metric == "mse":
             loss_fn = torch.nn.MSELoss()
         elif metric == "mae":
-            loss_fn = make_mae_loss(transformation)
+            loss_fn = make_mae_loss(transformation, log_offset)
         elif metric == "rmse":
             mse_loss = torch.nn.MSELoss()
 
             def loss_fn(x, y):
                 return torch.sqrt(mse_loss(x, y))
 
+        elif metric == "pearson_r2":
+            loss_fn = compute_pearson_r2
         elif metric == "r2":
             loss_fn = compute_r2
-        elif metric == "pseudo-r2":
-            loss_fn = compute_pseudo_r2
 
         return loss_fn(logits[:, tissue_idx], labels[:, tissue_idx])
 
     return loss
 
 
-def make_mae_loss(transformation="log10") -> callable:
+def make_mae_loss(transformation="log", log_offset=0.001) -> callable:
     """Make a function computing MAE (L1) loss
 
     Returns:
@@ -118,9 +121,9 @@ def make_mae_loss(transformation="log10") -> callable:
     mae_loss = torch.nn.L1Loss()
 
     if transformation == "log10":
-        inverse = lambda x: torch.pow(10.0, x) - 1.0
+        inverse = lambda x: torch.pow(10.0, x) - log_offset
     elif transformation == "log":
-        inverse = lambda x: torch.exp(x) - 1.0
+        inverse = lambda x: torch.exp(x) - log_offset
     else:
         raise ValueError(
             "Original-scale MAE requires a 'log' or 'log10' transformation"

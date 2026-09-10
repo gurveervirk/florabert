@@ -88,6 +88,17 @@ It **clones this repository for code** and **copies the data from the
 `florabert-base` Kaggle dataset** (the original data is kept there; this repo
 is intentionally lean and does not ship the raw data or intermediate outputs).
 
+For a VS Code notebook connected to a Google Colab runtime, use
+[`notebooks/modernbert_maize_adaptation_colab.ipynb`](notebooks/modernbert_maize_adaptation_colab.ipynb).
+It downloads `Gurveer05/maize-promoter-sequences` from Hugging Face and the
+plant-pretrained ModernBERT checkpoint plus NAM data from version 3 of
+`gurveervirk/modernflorabert-base`. The version-3 Kaggle archive is large, so
+the notebook lists its metadata and downloads the required files individually;
+set `FLORABERT_DOWNLOAD_FULL_KAGGLE_ARCHIVE=1` only when the full archive is
+needed. It runs the plant→regression baseline and the plant→maize-MLM→regression
+ablation into separate output directories and retains the best validation-MSE
+checkpoint for each regression run.
+
 **First module has been completed. All data / outputs are under [`data`](https://github.com/gurveervirk/florabert/tree/main/data) or [`models`](https://github.com/gurveervirk/florabert/tree/main/models). Moving to Second Module. The following steps were essential for this [script](https://github.com/gurveervirk/florabert/blob/main/scripts/0-data-loading-processing/04-process-genex-nam.py).**
 
 The following updates have been done using python scripts under [`3-RNAseq-quantification/`](https://github.com/gurveervirk/florabert/tree/master/scripts/3-RNAseq-quantification):

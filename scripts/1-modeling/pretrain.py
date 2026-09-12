@@ -141,6 +141,9 @@ def main():
         training_settings["num_train_epochs"] = args.num_train_epochs
     if args.optimizer is not None:
         training_settings["optimizer"] = args.optimizer
+    if args.no_grad_clipping:
+        # Hugging Face Trainer treats zero as disabled gradient clipping.
+        training_settings["max_grad_norm"] = 0.0
     # ``precision`` is a CLI convenience; TrainingArguments uses fp16/bf16.
     training_settings["fp16"] = args.precision == "fp16"
     training_settings["bf16"] = args.precision == "bf16"

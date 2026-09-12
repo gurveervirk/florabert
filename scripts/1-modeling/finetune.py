@@ -249,6 +249,9 @@ def main():
         training_settings["num_train_epochs"] = args.num_train_epochs
     if args.optimizer is not None:
         training_settings["optimizer"] = args.optimizer
+    if args.no_grad_clipping:
+        training_settings.pop("max_grad_norm", None)
+        print("Conventional gradient clipping disabled by --no-grad-clipping")
     print(training_settings)
 
     num_epochs = int(training_settings.get("num_train_epochs", 3))

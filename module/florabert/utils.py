@@ -317,6 +317,7 @@ def get_args(
     learning_rate=None,
     num_train_epochs=None,
     optimizer=None,
+    no_grad_clipping=False,
     precision="fp16",
     resume_from_checkpoint=None,
     n_workers=None,
@@ -341,6 +342,8 @@ def get_args(
         num_train_epochs (int, optional): default finetuning epoch count.
         optimizer (str, optional): optimizer name, e.g. ``lamb``, ``adamw``,
             or ``stableadamw``.
+        no_grad_clipping (bool, optional): disable conventional gradient
+            clipping for optimizers such as StableAdamW that clip updates.
         resume_from_checkpoint (str, optional): checkpoint to resume training from.
         n_workers (int, optional): number of dataset tokenization workers.
     Returns:
@@ -502,6 +505,12 @@ def get_args(
         type=str,
         help="Optimizer name. Supported values include lamb, adam, adamw, and stableadamw.",
         default=optimizer,
+    )
+    parser.add_argument(
+        "--no-grad-clipping",
+        action="store_true",
+        help="Disable conventional gradient clipping during training.",
+        default=no_grad_clipping,
     )
     parser.add_argument(
         "--search-metric",

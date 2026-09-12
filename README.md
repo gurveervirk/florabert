@@ -77,9 +77,9 @@ For an opt-in StableAdamW finetuning run, install the additional optimizer
 dependency (`pip install torch-optimi`) and pass
 `--optimizer stableadamw`. The default remains the historical `lamb` optimizer.
 For the StableAdamW update-clipping comparison, omit `max_grad_norm` from the
-finetune settings; the optimizer's update clipping is intended to replace
-conventional gradient clipping. The script accepts the same optimizer override
-for MLM pretraining as well.
+finetune settings or pass `--no-grad-clipping`; the optimizer's update clipping
+is intended to replace conventional gradient clipping. The script accepts the
+same optimizer override for MLM pretraining as well.
 
 The default small architecture (6 layers, 6 heads, hidden 768) mirrors the
 original RoBERTa config; `modernbert-base.intermediate_size: 2048` is set so the

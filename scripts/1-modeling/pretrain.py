@@ -65,6 +65,7 @@ def main():
         pretrained_model=None,
         learning_rate=pretrain_defaults.get("learning_rate"),
         num_train_epochs=pretrain_defaults.get("num_train_epochs"),
+        optimizer=pretrain_defaults.get("optimizer"),
         precision=(
             "bf16"
             if pretrain_defaults.get("bf16", False)
@@ -138,6 +139,8 @@ def main():
         training_settings["learning_rate"] = args.learning_rate
     if args.num_train_epochs is not None:
         training_settings["num_train_epochs"] = args.num_train_epochs
+    if args.optimizer is not None:
+        training_settings["optimizer"] = args.optimizer
     # ``precision`` is a CLI convenience; TrainingArguments uses fp16/bf16.
     training_settings["fp16"] = args.precision == "fp16"
     training_settings["bf16"] = args.precision == "bf16"

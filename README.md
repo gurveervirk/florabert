@@ -73,6 +73,14 @@ paths are kept intact). ModernBERT requires `transformers>=4.48,<5.0` (pin the
 - **Finetune** (multitask gene-expression regression): `python scripts/1-modeling/finetune.py --model-name modernbert-pred-mean-pool`
 - **Evaluate**: `python scripts/1-modeling/evaluate.py --model-name modernbert-pred-mean-pool`
 
+For an opt-in StableAdamW finetuning run, install the additional optimizer
+dependency (`pip install torch-optimi`) and pass
+`--optimizer stableadamw`. The default remains the historical `lamb` optimizer.
+For the StableAdamW update-clipping comparison, omit `max_grad_norm` from the
+finetune settings; the optimizer's update clipping is intended to replace
+conventional gradient clipping. The script accepts the same optimizer override
+for MLM pretraining as well.
+
 The default small architecture (6 layers, 6 heads, hidden 768) mirrors the
 original RoBERTa config; `modernbert-base.intermediate_size: 2048` is set so the
 GeGLU MLP has roughly the same number of parameters as RoBERTa's 3072-wide MLP,

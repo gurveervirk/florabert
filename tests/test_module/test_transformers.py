@@ -130,6 +130,26 @@ def test_get_lamb_optimizer():
     assert optimizer is not None, "Failed to load optimizer"
 
 
+def test_get_stableadamw_optimizer():
+    optimi = pytest.importorskip("optimi")
+    model = torch.nn.Linear(4, 2)
+    optimizer = training._get_optimizer(
+        "stableadamw",
+        model,
+        learning_rate=1e-3,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=0,
+    )
+    assert isinstance(optimizer, optimi.StableAdamW)
+
+    loss = model(torch.ones(1, 4)).sum()
+    loss.backward()
+    before = model.weight.detach().clone()
+    optimizer.step()
+    assert not torch.equal(before, model.weight.detach())
+
+
 def test_linear_scheduler():
     tr._get_scheduler("linear", Adam(), 10000, num_warmup_steps=500)
 

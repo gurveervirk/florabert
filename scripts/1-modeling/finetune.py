@@ -43,23 +43,37 @@ def load_model(args, settings):
 
 
 def _head_diagnostics(model, optimizer):
-    """Return prediction-head norms and LAMB state for debugging stalled runs."""
+    """Return prediction-head norms and optimizer-specific diagnostics.
+
+    LAMB exposes useful trust-ratio state, but StableAdamW does not. Keep the
+    LAMB fields for historical runs while avoiding misleading null fields for
+    other optimizers.
+    """
     head = model.classifier
     output_layer = head.out_proj
     weight = output_layer.weight
-    state = optimizer.state.get(weight, {})
-
-    def scalar(name):
-        value = state.get(name)
-        return float(value.detach().float().cpu()) if value is not None else None
-
-    return {
+    diagnostics = {
         "head/weight_norm": float(weight.detach().float().norm().cpu()),
         "head/bias_norm": float(output_layer.bias.detach().float().norm().cpu()),
-        "lamb/weight_norm": scalar("weight_norm"),
-        "lamb/adam_norm": scalar("adam_norm"),
-        "lamb/trust_ratio": scalar("trust_ratio"),
     }
+
+    base_optimizer = getattr(optimizer, "optimizer", optimizer)
+    if base_optimizer.__class__.__name__.lower() == "lamb":
+        state = base_optimizer.state.get(weight, {})
+
+        def scalar(name):
+            value = state.get(name)
+            return float(value.detach().float().cpu()) if value is not None else None
+
+        diagnostics.update(
+            {
+                "lamb/weight_norm": scalar("weight_norm"),
+                "lamb/adam_norm": scalar("adam_norm"),
+                "lamb/trust_ratio": scalar("trust_ratio"),
+            }
+        )
+
+    return diagnostics
 
 
 def _first_nonfinite_tensor(tensors):
@@ -157,6 +171,7 @@ def main():
         transformation=config.settings["training"]["finetune"]["transformation"],
         learning_rate=config.settings["training"]["finetune"]["learning_rate"],
         num_train_epochs=config.settings["training"]["finetune"]["num_train_epochs"],
+        optimizer=config.settings["training"]["finetune"].get("optimizer"),
         precision=config.settings["training"]["finetune"].get("precision", "bf16"),
         hyperparam_search_metrics="mse",
         hyperparam_search_trials=10,
@@ -232,6 +247,8 @@ def main():
         training_settings["learning_rate"] = args.learning_rate
     if args.num_train_epochs is not None:
         training_settings["num_train_epochs"] = args.num_train_epochs
+    if args.optimizer is not None:
+        training_settings["optimizer"] = args.optimizer
     print(training_settings)
 
     num_epochs = int(training_settings.get("num_train_epochs", 3))
@@ -347,9 +364,10 @@ def main():
                 )
             accelerator.backward(loss)
             grad_norm = None
-            if "max_grad_norm" in training_settings:
+            max_grad_norm = training_settings.get("max_grad_norm")
+            if max_grad_norm is not None:
                 grad_norm = accelerator.clip_grad_norm_(
-                    model.parameters(), training_settings["max_grad_norm"]
+                    model.parameters(), max_grad_norm
                 ).item()
                 if debug_numerics and not np.isfinite(grad_norm):
                     raise RuntimeError(

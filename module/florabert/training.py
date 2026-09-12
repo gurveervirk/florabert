@@ -94,8 +94,19 @@ def get_plateau_schedule_with_warmup(
 
 
 def _get_optimizer(
-    optimizer, model, num_param_groups, param_group_size, params=None, **kwargs
+    optimizer,
+    model,
+    num_param_groups=None,
+    param_group_size=None,
+    params=None,
+    **kwargs,
 ):
+    """Construct one of the optimizers supported by the project.
+
+    ``stableadamw`` is provided by the optional ``torch-optimi`` package.  It
+    is imported lazily so existing LAMB/Adam/AdamW runs remain usable in
+    environments that have not installed the optional optimizer dependency.
+    """
     if params is not None:
         param_groups = params
     elif num_param_groups or param_group_size:
@@ -104,11 +115,22 @@ def _get_optimizer(
         param_groups = model.parameters()
     if "learning_rate" in kwargs:
         kwargs["lr"] = kwargs.pop("learning_rate")
-    if optimizer == "lamb":
+
+    optimizer_name = optimizer.lower() if isinstance(optimizer, str) else optimizer
+    if optimizer_name in {"stableadamw", "stable_adamw", "stable-adamw"}:
+        try:
+            from optimi import StableAdamW
+        except ImportError as exc:
+            raise ImportError(
+                "The 'stableadamw' optimizer requires torch-optimi. "
+                "Install it with `pip install torch-optimi`."
+            ) from exc
+        return StableAdamW(param_groups, **kwargs)
+    elif optimizer_name == "lamb":
         return Lamb(param_groups, **kwargs)
-    elif optimizer == "adam":
+    elif optimizer_name == "adam":
         return Adam(param_groups, **kwargs)
-    elif optimizer == "adamw":
+    elif optimizer_name == "adamw":
         return AdamW(param_groups, **kwargs)
     elif callable(optimizer):
         return optimizer(param_groups, **kwargs)

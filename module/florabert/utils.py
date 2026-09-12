@@ -316,6 +316,7 @@ def get_args(
     output_mode=None,
     learning_rate=None,
     num_train_epochs=None,
+    optimizer=None,
     precision="fp16",
     resume_from_checkpoint=None,
     n_workers=None,
@@ -338,6 +339,8 @@ def get_args(
         output_mode (str, optional): default output mode for model and data transformation. Defaults to None.
         learning_rate (float, optional): default finetuning learning rate.
         num_train_epochs (int, optional): default finetuning epoch count.
+        optimizer (str, optional): optimizer name, e.g. ``lamb``, ``adamw``,
+            or ``stableadamw``.
         resume_from_checkpoint (str, optional): checkpoint to resume training from.
         n_workers (int, optional): number of dataset tokenization workers.
     Returns:
@@ -493,6 +496,12 @@ def get_args(
         help="Number of epochs to train for",
         dest="num_train_epochs",
         default=num_train_epochs,
+    )
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        help="Optimizer name. Supported values include lamb, adam, adamw, and stableadamw.",
+        default=optimizer,
     )
     parser.add_argument(
         "--search-metric",

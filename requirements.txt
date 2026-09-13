@@ -18,6 +18,7 @@ tensorboard
 tokenizers>=0.20
 torch>=2.1
 torch_optimizer
+torch-optimi>=0.3.3
 tqdm
 transformers>=4.48,<5.0
 datasets>=2.14

@@ -1,7 +1,10 @@
 """Performance of FLORABERT overall and disaggregated by tissue.
 """
 import sys
-sys.path.append('/kaggle/working/florabert')
+import os
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import torch
 from datasets import Dataset
 import pandas as pd
@@ -143,6 +146,7 @@ def main():
         transformation=args.transformation,
         discretize=(args.output_mode == "classification"),
         shuffle=False,
+        n_workers=args.n_workers or min(os.cpu_count() or 1, 8),
     )
     dataset_test = datasets["train"]
 

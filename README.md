@@ -73,6 +73,14 @@ paths are kept intact). ModernBERT requires `transformers>=4.48,<5.0` (pin the
 - **Finetune** (multitask gene-expression regression): `python scripts/1-modeling/finetune.py --model-name modernbert-pred-mean-pool`
 - **Evaluate**: `python scripts/1-modeling/evaluate.py --model-name modernbert-pred-mean-pool`
 
+For an opt-in StableAdamW finetuning run, install the additional optimizer
+dependency (`pip install torch-optimi`) and pass
+`--optimizer stableadamw`. The default remains the historical `lamb` optimizer.
+For the StableAdamW update-clipping comparison, omit `max_grad_norm` from the
+finetune settings or pass `--no-grad-clipping`; the optimizer's update clipping
+is intended to replace conventional gradient clipping. The script accepts the
+same optimizer override for MLM pretraining as well.
+
 The default small architecture (6 layers, 6 heads, hidden 768) mirrors the
 original RoBERTa config; `modernbert-base.intermediate_size: 2048` is set so the
 GeGLU MLP has roughly the same number of parameters as RoBERTa's 3072-wide MLP,
@@ -87,6 +95,17 @@ evaluate) is provided at
 It **clones this repository for code** and **copies the data from the
 `florabert-base` Kaggle dataset** (the original data is kept there; this repo
 is intentionally lean and does not ship the raw data or intermediate outputs).
+
+For a VS Code notebook connected to a Google Colab runtime, use
+[`notebooks/modernbert_maize_adaptation_colab.ipynb`](notebooks/modernbert_maize_adaptation_colab.ipynb).
+It downloads `Gurveer05/maize-promoter-sequences` from Hugging Face and the
+plant-pretrained ModernBERT checkpoint plus NAM data from version 3 of
+`gurveervirk/modernflorabert-base`. The version-3 Kaggle archive is large, so
+the notebook lists its metadata and downloads the required files individually;
+set `FLORABERT_DOWNLOAD_FULL_KAGGLE_ARCHIVE=1` only when the full archive is
+needed. It runs the plant→regression baseline and the plant→maize-MLM→regression
+ablation into separate output directories and retains the best validation-MSE
+checkpoint for each regression run.
 
 **First module has been completed. All data / outputs are under [`data`](https://github.com/gurveervirk/florabert/tree/main/data) or [`models`](https://github.com/gurveervirk/florabert/tree/main/models). Moving to Second Module. The following steps were essential for this [script](https://github.com/gurveervirk/florabert/blob/main/scripts/0-data-loading-processing/04-process-genex-nam.py).**
 

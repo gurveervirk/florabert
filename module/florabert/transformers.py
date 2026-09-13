@@ -1,4 +1,4 @@
-from pathlib import PosixPath
+from pathlib import Path, PosixPath
 from typing import Union, Optional
 
 import torch
@@ -102,6 +102,104 @@ MODELS = {
 }
 
 
+def _is_local_checkpoint(path: Union[str, PosixPath]) -> bool:
+    """Return whether ``path`` resolves to a local checkpoint directory."""
+    return Path(str(path)).is_dir()
+
+
+def _validate_local_checkpoint(path: Union[str, PosixPath]):
+    """Fail early when a local checkpoint path is incomplete."""
+    checkpoint = Path(path)
+    if not checkpoint.is_dir():
+        raise FileNotFoundError(
+            f"Pretrained checkpoint directory does not exist: {checkpoint}"
+        )
+    if not (checkpoint / "config.json").is_file():
+        raise FileNotFoundError(
+            f"Pretrained checkpoint is missing config.json: {checkpoint}"
+        )
+    weight_files = (
+        list(checkpoint.glob("*.safetensors"))
+        + list(checkpoint.glob("*.bin"))
+        + list(checkpoint.glob("*.safetensors.index.json"))
+        + list(checkpoint.glob("*.bin.index.json"))
+    )
+    if not weight_files:
+        raise FileNotFoundError(
+            f"Pretrained checkpoint has no model weight file (*.safetensors or *.bin): "
+            f"{checkpoint}"
+        )
+
+
+def _validate_tokenizer_compatibility(
+    tokenizer,
+    checkpoint_config,
+    max_position_embeddings: int,
+    checkpoint_path: Union[str, PosixPath],
+):
+    """Check that a tokenizer can consume the selected checkpoint unchanged."""
+    checkpoint_vocab_size = getattr(checkpoint_config, "vocab_size", None)
+    if checkpoint_vocab_size is not None and checkpoint_vocab_size != len(tokenizer):
+        raise ValueError(
+            "Tokenizer/checkpoint vocabulary mismatch: "
+            f"tokenizer has {len(tokenizer)} entries but {checkpoint_path} expects "
+            f"{checkpoint_vocab_size}. Do not resize or retrain the tokenizer for "
+            "continued MLM."
+        )
+
+    checkpoint_max_position_embeddings = getattr(
+        checkpoint_config, "max_position_embeddings", None
+    )
+    if (
+        checkpoint_max_position_embeddings is not None
+        and checkpoint_max_position_embeddings != max_position_embeddings
+    ):
+        raise ValueError(
+            "Tokenizer/model sequence-length mismatch: "
+            f"loader requested {max_position_embeddings} positions but "
+            f"{checkpoint_path} contains {checkpoint_max_position_embeddings}."
+        )
+
+    token_ids = {
+        "pad_token_id": getattr(tokenizer, "pad_token_id", None),
+        "bos_token_id": getattr(tokenizer, "bos_token_id", None),
+        "eos_token_id": getattr(tokenizer, "eos_token_id", None),
+        "cls_token_id": getattr(tokenizer, "cls_token_id", None),
+        "sep_token_id": getattr(tokenizer, "sep_token_id", None),
+    }
+    for name, tokenizer_id in token_ids.items():
+        checkpoint_id = getattr(checkpoint_config, name, None)
+        if (
+            tokenizer_id is not None
+            and checkpoint_id is not None
+            and tokenizer_id != checkpoint_id
+        ):
+            raise ValueError(
+                f"Tokenizer/checkpoint special-token mismatch for {name}: "
+                f"tokenizer={tokenizer_id}, checkpoint={checkpoint_id}."
+            )
+
+
+def _expected_missing_key(model_name: str, key: str) -> bool:
+    """Return whether a missing key is intentional for this model transition."""
+    if key.endswith("position_ids") or ".position_ids" in key:
+        return True
+    # A language-model checkpoint intentionally has no downstream regression
+    # head.  The base encoder must still be loaded and is checked separately.
+    return model_name.startswith(("roberta-pred", "modernbert-pred", "dnabert-pred")) and key.startswith(
+        "classifier."
+    )
+
+
+def _expected_unexpected_key(model_name: str, key: str) -> bool:
+    """Return whether an unexpected key is intentional for this model transition."""
+    # The regression model is initialized from an MLM checkpoint, so the MLM
+    # prediction head is not part of the downstream architecture.
+    return model_name.startswith(("roberta-pred", "modernbert-pred", "dnabert-pred")) and key.startswith(
+        ("lm_head.", "head.", "cls.", "decoder.")
+    )
+
+
 def load_model(
     model_name: str,
     tokenizer_dir: Union[str, PosixPath],
@@ -200,10 +298,86 @@ def load_model(
     if pretrained_model:
         print(f"Loading from pretrained model {pretrained_model}")
 
-        model = model_class.from_pretrained(
+        if _is_local_checkpoint(pretrained_model):
+            _validate_local_checkpoint(pretrained_model)
+
+        # Inspect the checkpoint's own architecture metadata before loading
+        # weights into the configuration assembled from the repo settings.
+        # This prevents an accidental embedding resize from hiding a tokenizer
+        # mismatch during a continued-MLM run.
+        checkpoint_config = config_class.from_pretrained(str(pretrained_model))
+        _validate_tokenizer_compatibility(
+            tokenizer,
+            checkpoint_config,
+            max_position_embeddings,
+            pretrained_model,
+        )
+
+        loaded = model_class.from_pretrained(
             str(pretrained_model),
             config=config_obj,
+            output_loading_info=True,
             _fast_init=False,
+        )
+
+        if not isinstance(loaded, tuple) or len(loaded) != 2:
+            raise RuntimeError(
+                "Transformers did not return loading information for the "
+                f"pretrained checkpoint {pretrained_model}; refusing to assume "
+                "that weights were loaded."
+            )
+        model, loading_info = loaded
+
+        missing_keys = list(loading_info.get("missing_keys", []))
+        unexpected_keys = list(loading_info.get("unexpected_keys", []))
+        mismatched_keys = list(loading_info.get("mismatched_keys", []))
+        relevant_missing = [
+            key for key in missing_keys if not _expected_missing_key(model_name, key)
+        ]
+        relevant_unexpected = [
+            key
+            for key in unexpected_keys
+            if not _expected_unexpected_key(model_name, key)
+        ]
+        if mismatched_keys:
+            raise RuntimeError(
+                f"Pretrained checkpoint has mismatched tensor shapes for "
+                f"{model_name}: {mismatched_keys}"
+            )
+        if relevant_missing or relevant_unexpected:
+            raise RuntimeError(
+                f"Pretrained checkpoint did not match {model_name}. "
+                f"Missing keys: {relevant_missing}; "
+                f"unexpected keys: {relevant_unexpected}"
+            )
+
+        base_prefix = getattr(model, "base_model_prefix", None)
+        base_parameter_names = [
+            name
+            for name, _ in model.named_parameters()
+            if base_prefix
+            and (name == base_prefix or name.startswith(f"{base_prefix}."))
+        ]
+        loaded_base_names = [
+            name for name in base_parameter_names if name not in missing_keys
+        ]
+        if not base_parameter_names or not loaded_base_names:
+            raise RuntimeError(
+                f"No {model_name} base-encoder weights were loaded from "
+                f"{pretrained_model}; refusing to train from a random base."
+            )
+        if len(loaded_base_names) != len(base_parameter_names):
+            missing_base = [
+                name for name in base_parameter_names if name in missing_keys
+            ]
+            raise RuntimeError(
+                f"Only {len(loaded_base_names)}/{len(base_parameter_names)} "
+                f"base-encoder parameters loaded from {pretrained_model}; "
+                f"missing base keys: {missing_base}"
+            )
+        print(
+            f"Verified pretrained load: {len(loaded_base_names):,} base parameter "
+            f"tensors loaded from {pretrained_model}"
         )
 
         # Explicitly verify that the prediction/regression head exists and
@@ -230,7 +404,14 @@ def load_model(
                     "Prediction head contains non-finite parameters "
                     "after initialization"
                 )
-        else:
+        elif model_name.endswith("-lm") and not (
+            hasattr(model, "lm_head") or hasattr(model, "decoder")
+        ):
+            raise RuntimeError(
+                f"Expected language-model '{model_name}' to expose an MLM head, "
+                "but none was found."
+            )
+        elif not model_name.endswith("-lm"):
             raise RuntimeError(
                 f"Expected model '{model_name}' to have a "
                 "classifier/prediction head, but no classifier was found."
@@ -241,5 +422,12 @@ def load_model(
         model = model_class(config=config_obj)
 
     model.resize_token_embeddings(len(tokenizer))
+
+    embedding_count = model.get_input_embeddings().num_embeddings
+    if embedding_count != len(tokenizer):
+        raise RuntimeError(
+            f"Model/tokenizer vocabulary mismatch after loading: model has "
+            f"{embedding_count} embeddings, tokenizer has {len(tokenizer)}."
+        )
 
     return config_obj, tokenizer, model

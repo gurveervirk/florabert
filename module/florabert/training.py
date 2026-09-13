@@ -4,7 +4,7 @@ training.py
 Functions and classes for training pytorch models.
 """
 import os
-from pathlib import PosixPath
+from pathlib import Path, PosixPath
 from typing import Callable, Union
 import multiprocessing as mp
 import inspect
@@ -94,8 +94,19 @@ def get_plateau_schedule_with_warmup(
 
 
 def _get_optimizer(
-    optimizer, model, num_param_groups, param_group_size, params=None, **kwargs
+    optimizer,
+    model,
+    num_param_groups=None,
+    param_group_size=None,
+    params=None,
+    **kwargs,
 ):
+    """Construct one of the optimizers supported by the project.
+
+    ``stableadamw`` is provided by the optional ``torch-optimi`` package.  It
+    is imported lazily so existing LAMB/Adam/AdamW runs remain usable in
+    environments that have not installed the optional optimizer dependency.
+    """
     if params is not None:
         param_groups = params
     elif num_param_groups or param_group_size:
@@ -104,11 +115,22 @@ def _get_optimizer(
         param_groups = model.parameters()
     if "learning_rate" in kwargs:
         kwargs["lr"] = kwargs.pop("learning_rate")
-    if optimizer == "lamb":
+
+    optimizer_name = optimizer.lower() if isinstance(optimizer, str) else optimizer
+    if optimizer_name in {"stableadamw", "stable_adamw", "stable-adamw"}:
+        try:
+            from optimi import StableAdamW
+        except ImportError as exc:
+            raise ImportError(
+                "The 'stableadamw' optimizer requires torch-optimi. "
+                "Install it with `pip install torch-optimi`."
+            ) from exc
+        return StableAdamW(param_groups, **kwargs)
+    elif optimizer_name == "lamb":
         return Lamb(param_groups, **kwargs)
-    elif optimizer == "adam":
+    elif optimizer_name == "adam":
         return Adam(param_groups, **kwargs)
-    elif optimizer == "adamw":
+    elif optimizer_name == "adamw":
         return AdamW(param_groups, **kwargs)
     elif callable(optimizer):
         return optimizer(param_groups, **kwargs)
@@ -447,15 +469,28 @@ def make_trainer(
 
 def do_training(trainer, args, output_dir):
     """
-    Run HuggingFace trainer, loading latest checkpoint if `args.warmstart`
-    is True.
+    Run HuggingFace Trainer, optionally resuming from an explicit checkpoint or
+    the latest checkpoint in ``output_dir``.
     """
-    if args.warmstart:
-        ckpt = get_latest_checkpoint(output_dir)
-        print(f"Resuming training from {ckpt}")
-        trainer.train(str(ckpt))
+    checkpoint = getattr(args, "resume_from_checkpoint", None)
+    if checkpoint is None and args.warmstart:
+        checkpoint = get_latest_checkpoint(output_dir)
+        if checkpoint is None:
+            raise FileNotFoundError(
+                f"--warmstart was requested, but no checkpoint-* directory exists in "
+                f"{output_dir}"
+            )
+
+    if checkpoint is not None:
+        checkpoint = Path(checkpoint)
+        if not checkpoint.is_dir():
+            raise FileNotFoundError(
+                f"Requested resume checkpoint does not exist or is not a directory: "
+                f"{checkpoint}"
+            )
+        print(f"Resuming training from {checkpoint}")
+        trainer.train(resume_from_checkpoint=str(checkpoint))
     else:
-#         with torch.no_grad():
         trainer.train()
 
     return trainer

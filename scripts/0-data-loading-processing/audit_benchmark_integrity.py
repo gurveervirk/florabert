@@ -103,6 +103,33 @@ def parse_args() -> argparse.Namespace:
         or "",
     )
     parser.add_argument(
+        "--mmseqs-workflow",
+        choices=("easy-cluster", "easy-linclust"),
+        default=os.environ.get("FLORABERT_MMSEQS_WORKFLOW", "easy-cluster")
+        .strip()
+        or "easy-cluster",
+        help="MMseqs2 clustering workflow to use.",
+    )
+    parser.add_argument(
+        "--mmseqs-split-memory-limit",
+        default=os.environ.get("FLORABERT_MMSEQS_SPLIT_MEMORY_LIMIT", "").strip()
+        or None,
+        help=(
+            "Optional MMseqs2 per-split memory limit, for example 20G. "
+            "Use this to leave RAM for the runtime and other database structures."
+        ),
+    )
+    parser.add_argument(
+        "--mmseqs-threads",
+        type=int,
+        default=(
+            int(os.environ["FLORABERT_MMSEQS_THREADS"])
+            if os.environ.get("FLORABERT_MMSEQS_THREADS", "").strip()
+            else None
+        ),
+        help="Optional MMseqs2 thread count.",
+    )
+    parser.add_argument(
         "--max-examples",
         type=int,
         default=500,
@@ -570,6 +597,9 @@ def run_mmseqs_cluster_audit(
     mlm_paths: dict[str, Path],
     audit_root: Path,
     mmseqs_binary: str,
+    mmseqs_workflow: str,
+    mmseqs_split_memory_limit: str | None,
+    mmseqs_threads: int | None,
 ) -> dict:
     if not mmseqs_binary:
         raise FileNotFoundError(
@@ -592,13 +622,19 @@ def run_mmseqs_cluster_audit(
 
     command = [
         mmseqs_binary,
-        "easy-cluster",
+        mmseqs_workflow,
         str(fasta_path),
         str(output_prefix),
         str(tmp_root),
         "--min-seq-id",
         "0.8",
     ]
+    if mmseqs_split_memory_limit:
+        command.extend(["--split-memory-limit", mmseqs_split_memory_limit])
+    if mmseqs_threads is not None:
+        if mmseqs_threads < 1:
+            raise ValueError("MMseqs2 thread count must be at least 1.")
+        command.extend(["--threads", str(mmseqs_threads)])
     print("Running:", " ".join(command), flush=True)
     subprocess.run(command, check=True)
 
@@ -681,7 +717,10 @@ def run_mmseqs_cluster_audit(
     result = {
         "status": "complete_from_mmseqs2",
         "mmseqs_binary": str(mmseqs_binary),
+        "mmseqs_workflow": mmseqs_workflow,
         "min_seq_id": 0.8,
+        "split_memory_limit": mmseqs_split_memory_limit,
+        "threads": mmseqs_threads,
         "combined_fasta": str(fasta_path),
         "combined_fasta_records": record_count,
         "clusters": len(cluster_members),
@@ -757,6 +796,17 @@ def main() -> int:
     print("Expression dataset:", args.expression_repo, flush=True)
     print("Maize MLM dataset:", args.mlm_repo, flush=True)
     print("Run MMseqs2:", args.run_mmseqs, flush=True)
+    print("MMseqs2 workflow:", args.mmseqs_workflow, flush=True)
+    print(
+        "MMseqs2 split memory limit:",
+        args.mmseqs_split_memory_limit or "MMseqs2 default",
+        flush=True,
+    )
+    print(
+        "MMseqs2 threads:",
+        args.mmseqs_threads or "MMseqs2 default",
+        flush=True,
+    )
     print("HF token supplied by environment:", bool(optional_token_kwargs()), flush=True)
 
     mlm_paths = download_mlm_files(args.mlm_repo, mlm_root)
@@ -812,6 +862,9 @@ def main() -> int:
             mlm_paths,
             audit_root,
             args.mmseqs_bin,
+            args.mmseqs_workflow,
+            args.mmseqs_split_memory_limit,
+            args.mmseqs_threads,
         )
     else:
         cluster_result = {
